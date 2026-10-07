@@ -4,7 +4,7 @@ import unicodedata
 from pydantic import BaseModel, ConfigDict, field_validator
 
 class BookingRequest(BaseModel):
-    model_config = ConfigDict(str_strip_whitespace=True, extra='ignore')
+    model_config = ConfigDict(str_strip_whitespace=True, extra='ignore', validate_default=True)
     patient_name: str
     service_or_specialty: str
     city_or_branch: str

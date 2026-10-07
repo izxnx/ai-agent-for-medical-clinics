@@ -19,9 +19,23 @@ def test_empty_phone_allowed_callback_or_urgent():
     BookingRequest(**payload(patient_phone="",service_or_specialty="Передзвін"))
     BookingRequest(**payload(patient_phone="",is_urgent=True))
 
-@pytest.mark.parametrize("changes,field", [({"patient_name":"  "},"patient_name"),("phone", "patient_phone"),("city_or_branch", "city_or_branch"),("service_or_specialty", "service_or_specialty")])
-def test_invalid_fields(changes,field):
-    values=payload()
-    if changes=="phone": values["patient_phone"]="123"
-    else: values[changes]=""
-    with pytest.raises(ValidationError): BookingRequest(**values)
+@pytest.mark.parametrize("field,value", [("patient_name","  "),("patient_phone","123"),("city_or_branch",""),("service_or_specialty","")])
+def test_invalid_fields(field,value):
+    values=payload(); values[field]=value
+    with pytest.raises(ValidationError) as err: BookingRequest(**values)
+    assert err.value.errors()[0]['loc']==(field,)
+
+
+def test_control_characters_removed_and_limits_enforced():
+    value=BookingRequest(**payload(patient_name='Тест\nовий'))
+    assert value.patient_name=='Тестовий'
+    with pytest.raises(ValidationError) as err:
+        BookingRequest(**payload(symptoms_summary='x'*1001))
+    assert err.value.errors()[0]['loc']==('symptoms_summary',)
+
+
+def test_omitted_phone_requires_phone_field():
+    values=payload(); values.pop('patient_phone')
+    with pytest.raises(ValidationError) as err:
+        BookingRequest(**values)
+    assert err.value.errors()[0]['loc']==('patient_phone',)
