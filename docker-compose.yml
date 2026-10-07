@@ -1,0 +1,29 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: booking
+      POSTGRES_USER: booking
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U booking -d booking"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+  app:
+    build: .
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: postgresql://booking:${POSTGRES_PASSWORD}@db:5432/booking
+      VAPI_SECRET: ${VAPI_SECRET:?Set VAPI_SECRET in .env}
+      TG_BOT_TOKEN: ${TG_BOT_TOKEN:-}
+      TG_ADMIN_IDS: ${TG_ADMIN_IDS:-}
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+volumes:
+  postgres_data:
