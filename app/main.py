@@ -20,6 +20,7 @@ MIN_USER_CHARS = 40  # дзвінок без заявки, де пацієнт �
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    settings.validate_for_startup()
     app.state.pool = await db.create_pool(settings.database_url)
     await db.run_migrations(app.state.pool)
     worker = None
@@ -43,6 +44,7 @@ async def submit_booking_request(pool, args: dict, call: dict, tool_call_id: str
     """Рядок, який повертаємо, агент озвучить пацієнту."""
     call_id = call.get("id", "")
     args = dict(args)
+    # TODO(verify-vapi): підтвердити шлях call.customer.number для робочого webhook payload.
     # Якщо пацієнт підтвердив "номер, з якого дзвонить", модель може лишити поле порожнім
     if not args.get("patient_phone"):
         args["patient_phone"] = (call.get("customer") or {}).get("number") or ""
@@ -121,12 +123,17 @@ async def handle_end_of_call(pool, msg: dict) -> None:
     notifier.fire_and_forget(notifier.notify_after_call(pool, log_id, escalated, needs_callback))
 
 
+def _secret_matches(provided: str, expected: str) -> bool:
+    return hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
+
+
 # --- Webhook -----------------------------------------------------------------
 @app.post("/vapi/webhook")
 async def vapi_webhook(request: Request, x_vapi_secret: str = Header(default=""), authorization: str = Header(default="")):
+    # TODO(verify-vapi): точний HTTP-заголовок залежить від налаштувань credential у Vapi.
     bearer_secret = authorization[7:] if authorization.startswith("Bearer ") else ""
-    if not (hmac.compare_digest(x_vapi_secret.encode("utf-8"), settings.vapi_secret.encode("utf-8"))
-            or hmac.compare_digest(bearer_secret.encode("utf-8"), settings.vapi_secret.encode("utf-8"))):
+    if not (_secret_matches(x_vapi_secret, settings.vapi_secret)
+            or _secret_matches(bearer_secret, settings.vapi_secret)):
         raise HTTPException(status_code=401, detail="unauthorized")
 
     try:
@@ -139,13 +146,19 @@ async def vapi_webhook(request: Request, x_vapi_secret: str = Header(default="")
     if not isinstance(msg, dict):
         msg = {}
 
-    pool = request.app.state.pool
     kind = msg.get("type")
+    if kind not in {"tool-calls", "end-of-call-report"}:
+        return {}
+    pool = request.app.state.pool
 
     if kind == "tool-calls":
         call = msg.get("call", {})
         results = []
-        for tc in msg.get("toolCallList", []):
+        tool_calls = msg.get("toolCallList", [])
+        if not isinstance(tool_calls, list):
+            log.warning("toolCallList is not a list for call %s", call.get("id", "unknown"))
+            return {"results": results}
+        for tc in tool_calls:
             if not isinstance(tc, dict) or not tc.get("id"):
                 log.warning("tool call without id skipped")
                 continue
