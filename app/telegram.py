@@ -37,7 +37,7 @@ async def _send_one(client: httpx.AsyncClient, method: str, payload: dict) -> st
         return "retry"
     if r.status_code == 200:
         return "ok"
-    log.warning("telegram %s -> %s: HTTP %s %s", method, chat_id, r.status_code, _description(r))
+    log.warning("telegram %s -> %s: HTTP %s", method, chat_id, r.status_code)
     return "retry" if r.status_code == 429 or r.status_code >= 500 else "perm"
 
 

@@ -33,6 +33,7 @@ async def _notify(pool, table: str, row_id: int, fmt) -> bool | None:
             )
             if row is None:
                 return None
+            # Транзакція БД утримується під час HTTP-запиту до Telegram (до 15 с); для пілоту це прийнятно.
             await telegram.send_message(fmt(row))
             await conn.execute(f"UPDATE {table} SET admin_notified_at = now() WHERE id = $1", row_id)
         return True
@@ -82,7 +83,7 @@ async def notify_recording(pool, row_id: int) -> bool | None:
                     "UPDATE call_logs SET recording_attempts = recording_attempts + 1 WHERE id = $1",
                     row_id,
                 )
-                log.warning("recording for call_log #%s not delivered: %s", row_id, e)
+                log.warning("recording for call_log #%s not delivered (%s)", row_id, type(e).__name__)
                 return False
             await conn.execute("UPDATE call_logs SET recording_sent_at = now() WHERE id = $1", row_id)
         return True

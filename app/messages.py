@@ -1,5 +1,6 @@
 """Тексти сповіщень для адміністраторів (Telegram, parse_mode=HTML). Без залежностей - легко тестувати."""
 from html import escape
+import re
 from zoneinfo import ZoneInfo
 
 from . import urgency
@@ -9,6 +10,36 @@ KYIV = ZoneInfo("Europe/Kyiv")
 
 def _e(value) -> str:
     return escape(str(value)) if value else "не вказано"
+
+
+def _truncate_message(text: str, limit: int = 4096) -> str:
+    if len(text) <= limit:
+        return text
+    tokens = re.findall(r"<[^>]*>|&(?:amp|lt|gt|quot|#x27);|.", text, re.S)
+    output = []
+    stack = []
+    visible = raw = 0
+    for token in tokens:
+        next_stack = list(stack)
+        if token.startswith("<"):
+            if token.startswith("</"):
+                tag = token[2:-1]
+                if tag in next_stack:
+                    next_stack.remove(tag)
+            else:
+                tag = token[1:-1].split()[0].rstrip("/")
+                if tag in {"b", "i", "u", "s", "code", "pre"}:
+                    next_stack.append(tag)
+        decoded_width = 0 if token.startswith("<") else 1
+        closers = sum(len(f"</{tag}>") for tag in next_stack)
+        if visible + decoded_width > limit or raw + len(token) + closers > limit:
+            break
+        output.append(token)
+        raw += len(token)
+        visible += decoded_width
+        stack = next_stack
+    output.extend(f"</{tag}>" for tag in reversed(stack))
+    return "".join(output)
 
 
 def _when(r) -> str:
@@ -35,7 +66,8 @@ def format_booking(r) -> str:
     if r["is_urgent"]:
         lines.append(f"⚠️ Причина: {_e(r['urgent_reason'])}")
     lines.append(f"\n<i>Дзвінок: {_when(r)}</i>")
-    return "\n".join(lines)
+    text = "\n".join(lines)
+    return _truncate_message(text, 4096)
 
 
 def format_call(r) -> str:
@@ -60,4 +92,5 @@ def recording_caption(r) -> str:
     ids = r["booking_ids"]
     what = "Заявка " + ", ".join(f"#{i}" for i in ids) if ids else "Дзвінок без заявки"
     head = "🚨 <b>ВАЖЛИВЕ</b> · 🎙 Запис розмови" if urgent else "🎙 <b>Запис розмови</b>"
-    return f"{head}\n{what}\n📞 {_e(r['caller_phone'])}\n<i>Дзвінок: {_when(r)}</i>"
+    text = f"{head}\n{what}\n📞 {_e(r['caller_phone'])}\n<i>Дзвінок: {_when(r)}</i>"
+    return _truncate_message(text, 1024)

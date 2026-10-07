@@ -45,7 +45,7 @@ async def submit_booking_request(pool, args: dict, call: dict, tool_call_id: str
     args = dict(args)
     # Якщо пацієнт підтвердив "номер, з якого дзвонить", модель може лишити поле порожнім
     if not args.get("patient_phone"):
-        args["patient_phone"] = call.get("customer", {}).get("number") or ""
+        args["patient_phone"] = (call.get("customer") or {}).get("number") or ""
 
     try:
         data = BookingRequest(**args)
@@ -75,7 +75,7 @@ TOOLS = {"submit_booking_request": submit_booking_request}
 
 # --- Кінець дзвінка ------------------------------------------------------------
 async def handle_end_of_call(pool, msg: dict) -> None:
-    call = msg.get("call", {})
+    call = msg.get("call") or {}
     call_id = call.get("id", "")
     if not call_id:
         log.warning("end-of-call-report without call id")
@@ -83,7 +83,11 @@ async def handle_end_of_call(pool, msg: dict) -> None:
 
     artifact = msg.get("artifact", {})  # у новіших версіях Vapi транскрипт тут, у старіших - у msg
     transcript = artifact.get("transcript") or msg.get("transcript") or ""
-    recording_url = artifact.get("recordingUrl") or msg.get("recordingUrl")
+    recording = artifact.get("recording")
+    # TODO(verify-vapi): artifact.recording може мати інший тип/URL залежно від зберігання у Vapi.
+    recording_url = (recording if isinstance(recording, str) else
+                     recording.get("url") if isinstance(recording, dict) else None)
+    recording_url = recording_url or artifact.get("recordingUrl") or msg.get("recordingUrl")
     user_text = urgency.user_part(transcript)
     hits = urgency.find_urgent(user_text)
     reason = ("автоперевірка розмови: " + ", ".join(hits)) if hits else None
@@ -95,7 +99,7 @@ async def handle_end_of_call(pool, msg: dict) -> None:
     log_id = await db.save_call_log(
         pool,
         call_id=call_id,
-        caller_phone=call.get("customer", {}).get("number"),
+        caller_phone=(call.get("customer") or {}).get("number"),
         ended_reason=msg.get("endedReason"),
         transcript=transcript or None,
         recording_url=recording_url,
@@ -119,14 +123,21 @@ async def handle_end_of_call(pool, msg: dict) -> None:
 
 # --- Webhook -----------------------------------------------------------------
 @app.post("/vapi/webhook")
-async def vapi_webhook(request: Request, x_vapi_secret: str = Header(default="")):
-    if not hmac.compare_digest(x_vapi_secret, settings.vapi_secret):
-        raise HTTPException(status_code=401, detail="bad secret")
+async def vapi_webhook(request: Request, x_vapi_secret: str = Header(default=""), authorization: str = Header(default="")):
+    bearer_secret = authorization[7:] if authorization.startswith("Bearer ") else ""
+    if not (hmac.compare_digest(x_vapi_secret.encode("utf-8"), settings.vapi_secret.encode("utf-8"))
+            or hmac.compare_digest(bearer_secret.encode("utf-8"), settings.vapi_secret.encode("utf-8"))):
+        raise HTTPException(status_code=401, detail="unauthorized")
 
     try:
-        msg = (await request.json()).get("message", {})
-    except ValueError:
+        body = await request.json()
+    except (ValueError, UnicodeDecodeError):
         raise HTTPException(status_code=400, detail="invalid json")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="invalid json")
+    msg = body.get("message", {})
+    if not isinstance(msg, dict):
+        msg = {}
 
     pool = request.app.state.pool
     kind = msg.get("type")
@@ -135,23 +146,30 @@ async def vapi_webhook(request: Request, x_vapi_secret: str = Header(default="")
         call = msg.get("call", {})
         results = []
         for tc in msg.get("toolCallList", []):
+            if not isinstance(tc, dict) or not tc.get("id"):
+                log.warning("tool call without id skipped")
+                continue
             tool = TOOLS.get(tc.get("name"))
             if tool is None:
                 result = "Невідомий інструмент."
             else:
                 try:
-                    args = tc.get("arguments", {})
+                    args = tc.get("arguments", tc.get("parameters", {}))
                     if isinstance(args, str):
                         args = json.loads(args)
                     result = await tool(pool, args, call, tc["id"])
-                except Exception:
-                    log.exception("tool %s failed", tc.get("name"))
-                    result = "Технічна помилка. Скажи пацієнту, що адміністратор сам зв'яжеться з ним."
-            results.append({"toolCallId": tc["id"], "result": result})
+                except Exception as exc:
+                    log.error("tool %s failed for call %s (%s)", tc.get("name"), call.get("id", "unknown"), type(exc).__name__)
+                    result = "Вибачте, сталася технічна помилка. Будь ласка, зателефонуйте нам зранку."
+            results.append({"toolCallId": tc["id"], "result": " ".join(str(result).split())})
         return {"results": results}
 
     if kind == "end-of-call-report":
-        await handle_end_of_call(pool, msg)
+        try:
+            await handle_end_of_call(pool, msg)
+        except Exception as exc:
+            log.error("end-of-call-report failed for call %s (%s)", (msg.get("call") or {}).get("id", "unknown"), type(exc).__name__)
+        return {}
 
     return {}
 
