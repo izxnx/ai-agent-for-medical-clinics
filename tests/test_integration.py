@@ -27,8 +27,8 @@ async def test_database_idempotency_escalation_upsert_and_advisory_lock():
         assert await db.save_call_log(pool,'call-log',None,'done','оновлений транскрипт',None,False,False,None,False)==logid
         async with pool.acquire() as conn:
             assert await conn.fetchval('SELECT transcript FROM call_logs WHERE id=$1',logid)=='оновлений транскрипт'
-            assert await conn.fetchval('SELECT pg_try_advisory_lock(727002)')
-            assert await conn.fetchval('SELECT pg_advisory_unlock(727002)')
+            assert await conn.fetchval('SELECT pg_try_advisory_lock(727001)')
+            assert await conn.fetchval('SELECT pg_advisory_unlock(727001)')
     finally:
         if pool: await pool.close()
         await admin.execute(f'DROP SCHEMA "{schema}" CASCADE')
