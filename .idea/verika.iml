@@ -7,10 +7,4 @@
     <orderEntry type="jdk" jdkName="~\Desktop\verika\.venv" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
-  <component name="PackageRequirementsSettings" />
-  <component name="PyDocumentationSettings">
-    <option name="format" value="PLAIN" />
-  </component>
-  <component name="ReSTService" />
-  <component name="TestRunnerService" />
 </module>
