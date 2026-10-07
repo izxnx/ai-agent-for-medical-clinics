@@ -1,0 +1,28 @@
+{
+  "message": {
+    "type": "tool-calls",
+    "call": {
+      "id": "call-fake-005",
+      "customer": {
+        "number": "+380000000000"
+      }
+    },
+    "toolCallList": [
+      {
+        "id": "tool-005",
+        "name": "submit_booking_request",
+        "parameters": {
+          "patient_name": "Тестовий вигаданий пацієнт",
+          "patient_phone": "",
+          "service_or_specialty": "Консультація флеболога",
+          "city_or_branch": "",
+          "preferred_date": "Не вказано",
+          "preferred_time": "перша половина дня",
+          "symptoms_summary": "Вигаданий опис для тесту",
+          "is_urgent": false,
+          "urgent_reason": ""
+        }
+      }
+    ]
+  }
+}

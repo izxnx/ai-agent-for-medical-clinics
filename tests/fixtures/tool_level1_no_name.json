@@ -1,0 +1,25 @@
+{
+  "message": {
+    "type": "tool-calls",
+    "call": {
+      "id": "call-fake-002"
+    },
+    "toolCallList": [
+      {
+        "id": "tool-002",
+        "name": "submit_booking_request",
+        "parameters": {
+          "patient_name": "Не вказано",
+          "patient_phone": "",
+          "service_or_specialty": "Консультація флеболога",
+          "city_or_branch": "Львів",
+          "preferred_date": "Не вказано",
+          "preferred_time": "перша половина дня",
+          "symptoms_summary": "Вигаданий опис для тесту",
+          "is_urgent": true,
+          "urgent_reason": "ЕКСТРЕНО: нога раптово побіліла"
+        }
+      }
+    ]
+  }
+}

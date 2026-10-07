@@ -1,0 +1,16 @@
+{
+  "message": {
+    "type": "end-of-call-report",
+    "call": {
+      "id": "call-fake-001",
+      "customer": {
+        "number": "+380000000000"
+      }
+    },
+    "endedReason": "customer-ended-call",
+    "artifact": {
+      "transcript": "User: Я хочу консультацію флеболога у Львові.\nAssistant: Дякую.",
+      "recordingUrl": null
+    }
+  }
+}

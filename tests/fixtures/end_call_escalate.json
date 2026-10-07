@@ -1,0 +1,14 @@
+{
+  "message": {
+    "type": "end-of-call-report",
+    "call": {
+      "id": "call-fake-001",
+      "customer": {
+        "number": "+380000000000"
+      }
+    },
+    "artifact": {
+      "transcript": "User: Литка раптово сильно набрякла і болить уже кілька днів."
+    }
+  }
+}
