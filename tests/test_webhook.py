@@ -115,3 +115,23 @@ async def test_non_ascii_secret_uses_utf8_bytes(monkeypatch,fake_state):
     monkeypatch.setattr(main.settings,'vapi_secret','test-secret')
     response=await post({'message':None},{'X-Vapi-Secret':'test-secret'})
     assert response.status_code==200
+
+
+@pytest.mark.asyncio
+async def test_lifespan_without_telegram_leaves_database_available(monkeypatch,caplog):
+    class Pool:
+        closed=False
+        async def close(self): self.closed=True
+    pool=Pool(); migrations=[]; workers=[]
+    async def create_pool(dsn): return pool
+    async def run_migrations(dbpool): migrations.append(dbpool)
+    async def retry_loop(dbpool): workers.append(dbpool)
+    monkeypatch.setattr(main.db,'create_pool',create_pool)
+    monkeypatch.setattr(main.db,'run_migrations',run_migrations)
+    monkeypatch.setattr(main.telegram,'configured',lambda:False)
+    monkeypatch.setattr(main.notifier,'retry_loop',retry_loop)
+    async with main.lifespan(main.app):
+        assert main.app.state.pool is pool
+        assert migrations==[pool] and workers==[]
+        assert 'заявки лишаються в БД' in caplog.text
+    assert pool.closed
