@@ -1,0 +1,104 @@
+{
+  "_comment": "TODO(verify-vapi): перевірити підтримку української мовною моделлю, голосом і транскрайбером та звірити поля з актуальною схемою Assistant. Для server URL використовуйте Custom Credential з {{VAPI_SECRET}}; заголовок залежить від типу credential.",
+  "firstMessage": "Вітаю, це Клініка флебології. Розмова записується. Мене звати Олена, я віртуальний асистент. Чим можу допомогти?",
+  "model": {
+    "provider": "{{MODEL_PROVIDER}}",
+    "model": "{{MODEL}}",
+    "messages": [
+      {
+        "role": "system",
+        "content": "{{OLENA_SYSTEM_PROMPT_FROM_prompts/olena_system_prompt.md}}"
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "submit_booking_request",
+          "description": "Створи заявку лише після збору потрібних даних; виняток — рівень 1.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "patient_name": {
+                "type": "string",
+                "description": "Ім'я або «Не вказано»/«Не назвався»."
+              },
+              "patient_phone": {
+                "type": "string",
+                "description": "Український номер або порожній лише для екстреного випадку/передзвону."
+              },
+              "service_or_specialty": {
+                "type": "string",
+                "description": "Послуга, спеціальність або «Передзвін»."
+              },
+              "city_or_branch": {
+                "type": "string",
+                "description": "Місто чи відділення."
+              },
+              "preferred_date": {
+                "type": "string",
+                "description": "Дата або «Не вказано»."
+              },
+              "preferred_time": {
+                "type": "string",
+                "description": "Перша/друга половина дня або «Не вказано»."
+              },
+              "symptoms_summary": {
+                "type": "string",
+                "description": "Короткий виклад слів пацієнта без діагнозу."
+              },
+              "is_urgent": {
+                "type": "boolean",
+                "description": "Чи є пріоритетні або невідкладні ознаки."
+              },
+              "urgent_reason": {
+                "type": "string",
+                "description": "Причина позначки urgency або порожній рядок."
+              }
+            },
+            "required": [
+              "patient_name",
+              "service_or_specialty",
+              "city_or_branch",
+              "is_urgent"
+            ]
+          }
+        },
+        "server": {
+          "url": "{{SERVER_URL}}/vapi/webhook",
+          "credentialId": "{{VAPI_CREDENTIAL_ID}}"
+        }
+      },
+      {
+        "type": "endCall"
+      }
+    ]
+  },
+  "voice": {
+    "provider": "{{VOICE_PROVIDER}}",
+    "voiceId": "{{VOICE_ID}}"
+  },
+  "transcriber": {
+    "provider": "{{TRANSCRIBER_PROVIDER}}",
+    "model": "{{TRANSCRIBER_MODEL}}",
+    "language": "{{LANGUAGE}}"
+  },
+  "server": {
+    "url": "{{SERVER_URL}}/vapi/webhook",
+    "credentialId": "{{VAPI_CREDENTIAL_ID}}"
+  },
+  "serverMessages": [
+    "tool-calls",
+    "end-of-call-report"
+  ],
+  "maxDurationSeconds": 900,
+  "silenceTimeoutSeconds": 30,
+  "artifactPlan": {
+    "recordingEnabled": true,
+    "transcriptPlan": {
+      "enabled": true,
+      "assistantName": "Assistant",
+      "userName": "Customer"
+    }
+  }
+}
