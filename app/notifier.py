@@ -33,7 +33,7 @@ async def _notify(pool, table: str, row_id: int, fmt) -> bool | None:
             )
             if row is None:
                 return None
-            # Транзакція БД утримується під час HTTP-запиту до Telegram (до 15 с); для пілоту це прийнятно.
+            # Транзакція БД утримується під час HTTP-запиту до Telegram (до 15 с); для демо це прийнятно.
             await telegram.send_message(fmt(row))
             await conn.execute(f"UPDATE {table} SET admin_notified_at = now() WHERE id = $1", row_id)
         return True
@@ -77,6 +77,8 @@ async def notify_recording(pool, row_id: int) -> bool | None:
             if row is None:
                 return None
             try:
+                # Тут транзакція тримається під час завантаження й відправлення файла (до 60 с кожен крок);
+                # це допустимо лише для демо-навантаження, для production треба винести I/O за межі транзакції.
                 await telegram.send_recording(row["recording_url"], messages.recording_caption(row))
             except Exception as e:
                 await conn.execute(

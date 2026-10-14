@@ -21,9 +21,15 @@ services:
       TG_BOT_TOKEN: ${TG_BOT_TOKEN:-}
       TG_ADMIN_IDS: ${TG_ADMIN_IDS:-}
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     depends_on:
       db:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 volumes:
   postgres_data:

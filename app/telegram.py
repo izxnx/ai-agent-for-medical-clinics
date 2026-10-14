@@ -1,4 +1,4 @@
-"""Відправка адмінам у Telegram. Токен бота лежить в URL, тому URL ніколи не потрапляє в логи/помилки."""
+"""Надсилання повідомлень і записів до Telegram-чатів адміністраторів."""
 import logging
 from urllib.parse import urlparse
 
@@ -7,66 +7,144 @@ import httpx
 from .config import settings
 
 log = logging.getLogger("telegram")
+MAX_RECORDING_BYTES = 45 * 1024 * 1024
+CHUNK_SIZE = 64 * 1024
+
+
+class TelegramDeliveryError(RuntimeError):
+    """Безпечна для логів помилка доставки без URL, токенів або тексту відповіді API."""
+
 
 def get_chat_ids() -> list[str]:
-    """Повертає список ID чатів (або один ID групи) з .env"""
-    return [x.strip() for x in settings.tg_admin_ids.split(",") if x.strip()]
+    """Повертає ID адміністраторів або групи з TG_ADMIN_IDS."""
+    return [value.strip() for value in settings.tg_admin_ids.split(",") if value.strip()]
+
 
 def configured() -> bool:
     return bool(settings.tg_bot_token and get_chat_ids())
 
-def _description(r: httpx.Response) -> str:
-    try:
-        return str(r.json().get("description", ""))
-    except ValueError:
-        return ""
 
-async def _send_to_chat(method: str, payload: dict, file_bytes: bytes = None, filename: str = None) -> None:
-    """Відправляє лог у вказаний чат/групу."""
-    if not configured():
+def _is_api_success(response: httpx.Response) -> bool:
+    if not response.is_success:
+        return False
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    return isinstance(body, dict) and body.get("ok") is True
+
+
+async def _send_to_chats(
+    method: str,
+    payload: dict,
+    file_bytes: bytes | None = None,
+    filename: str | None = None,
+) -> None:
+    """Надсилає у всі налаштовані чати; успіх є, якщо доставлено хоча б в один."""
+    chat_ids = get_chat_ids()
+    if not settings.tg_bot_token or not chat_ids:
         return
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        for chat_id in get_chat_ids():
-            url = f"https://api.telegram.org/bot{settings.tg_bot_token}/{method}"
-            req_payload = {**payload, "chat_id": chat_id}
+    if file_bytes is not None:
+        file_key = {"sendAudio": "audio", "sendDocument": "document"}.get(method)
+        if file_key is None:
+            raise ValueError("Multipart upload is supported only for audio and document")
+        files = {file_key: (filename or "recording.bin", file_bytes)}
+    else:
+        files = None
 
-            req_files = None
-            if file_bytes:
-                file_key = "audio" if method == "sendAudio" else "document"
-                req_files = {file_key: (filename, file_bytes)}
-
+    failures: list[str] = []
+    timeout = 60.0 if files is not None else 15.0
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        for chat_id in chat_ids:
+            # Токен Telegram присутній в URL Bot API, тому URL і винятки HTTPX не логувати.
+            api_url = f"https://api.telegram.org/bot{settings.tg_bot_token}/{method}"
+            request_payload = {**payload, "chat_id": chat_id}
             try:
-                if req_files:
-                    r = await client.post(url, data=req_payload, files=req_files)
+                if files is None:
+                    response = await client.post(api_url, json=request_payload)
                 else:
-                    r = await client.post(url, json=req_payload)
+                    response = await client.post(api_url, data=request_payload, files=files)
+            except httpx.HTTPError as exc:
+                log.warning("Telegram %s failed for chat %s (%s)", method, chat_id, type(exc).__name__)
+                failures.append(f"{chat_id}:network")
+                continue
 
-                if r.status_code != 200:
-                    log.warning("telegram %s -> %s: HTTP %s (%s)", method, chat_id, r.status_code, _description(r))
-            except httpx.HTTPError as e:
-                log.warning("telegram %s -> %s: %s", method, chat_id, type(e).__name__)
+            if _is_api_success(response):
+                continue
+
+            log.warning("Telegram %s failed for chat %s (HTTP %s)", method, chat_id, response.status_code)
+            failures.append(f"{chat_id}:http_{response.status_code}")
+
+    if len(failures) == len(chat_ids):
+        # Не додаємо опис Telegram API: у ньому не має бути секретів або приватних даних.
+        raise TelegramDeliveryError(f"{method} was not delivered to any configured Telegram chat")
+    if failures:
+        log.warning("Telegram %s was delivered only to some configured chats", method)
+
 
 async def send_message(text: str) -> None:
-    await _send_to_chat("sendMessage", {
-        "text": text, "parse_mode": "HTML", "disable_web_page_preview": True,
+    await _send_to_chats("sendMessage", {
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
     })
 
+
+def _recording_filename(content_type: str, url_path: str) -> tuple[str, str]:
+    """Повертає безпечний тип методу Telegram і назву файла за MIME/URL."""
+    mime = content_type.split(";", 1)[0].strip().lower()
+    suffix = urlparse(url_path).path.rsplit(".", 1)[-1].lower() if "." in urlparse(url_path).path else ""
+
+    if mime == "audio/mpeg" or suffix == "mp3":
+        return "sendAudio", "recording.mp3"
+    if mime in {"audio/mp4", "audio/m4a", "audio/x-m4a"} or suffix == "m4a":
+        return "sendAudio", "recording.m4a"
+    if mime in {"audio/wav", "audio/x-wav", "audio/wave"} or suffix == "wav":
+        return "sendDocument", "recording.wav"
+    if mime == "audio/ogg" or suffix == "ogg":
+        return "sendDocument", "recording.ogg"
+    if mime == "audio/aac" or suffix == "aac":
+        return "sendDocument", "recording.aac"
+    if mime in {"application/octet-stream", "binary/octet-stream", ""}:
+        return "sendDocument", "recording.bin"
+    if mime.startswith("audio/"):
+        return "sendDocument", "recording.audio"
+    raise TelegramDeliveryError("Recording endpoint returned a non-audio content type")
+
+
 async def send_recording(url: str, caption: str) -> None:
-    """Викачує запис та кидає його в чат адмінів."""
-    log.info("Завантаження запису розмови з %s", url)
+    """Завантажує обмежений за розміром аудіофайл і надсилає його адміністраторам."""
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise TelegramDeliveryError("Recording URL must use HTTPS")
 
-    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
-        try:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            file_bytes = resp.content
-        except httpx.HTTPError as e:
-            log.error("telegram.send_recording failed to download %s: %s", url, type(e).__name__)
-            raise RuntimeError(f"Не вдалося викачати запис: {e}")
+    content = bytearray()
+    content_type = ""
+    try:
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+            async with client.stream("GET", url) as response:
+                if not response.is_success:
+                    log.warning("Recording download failed (HTTP %s)", response.status_code)
+                    raise TelegramDeliveryError("Recording download failed")
+                content_type = response.headers.get("content-type", "")
+                content_length = response.headers.get("content-length")
+                if content_length and int(content_length) > MAX_RECORDING_BYTES:
+                    raise TelegramDeliveryError("Recording is larger than the configured upload limit")
+                async for chunk in response.aiter_bytes(CHUNK_SIZE):
+                    content.extend(chunk)
+                    if len(content) > MAX_RECORDING_BYTES:
+                        raise TelegramDeliveryError("Recording is larger than the configured upload limit")
+    except TelegramDeliveryError:
+        raise
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("Recording download failed (%s)", type(exc).__name__)
+        raise TelegramDeliveryError("Recording download failed") from None
 
-    path = urlparse(url).path.lower()
-    if path.endswith((".mp3", ".m4a")):
-        await _send_to_chat("sendAudio", {"caption": caption, "parse_mode": "HTML"}, file_bytes=file_bytes, filename="recording.mp3")
-    else:
-        await _send_to_chat("sendDocument", {"caption": caption, "parse_mode": "HTML"}, file_bytes=file_bytes, filename="recording.wav")
+    method, filename = _recording_filename(content_type, parsed.path)
+    await _send_to_chats(
+        method,
+        {"caption": caption, "parse_mode": "HTML"},
+        file_bytes=bytes(content),
+        filename=filename,
+    )
