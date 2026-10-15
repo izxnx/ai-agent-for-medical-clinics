@@ -1,8 +1,12 @@
 __pycache__/
 *.py[cod]
 .env
+.env.*
+!.env.example
 .venv/
 .pytest_cache/
+.ruff_cache/
+.uv-cache/
 work/
 
 .idea/

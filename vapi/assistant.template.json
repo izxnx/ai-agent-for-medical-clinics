@@ -1,5 +1,5 @@
 {
-  "_comment": "TODO(verify-vapi): перевірити підтримку української мовною моделлю, голосом і транскрайбером та звірити поля з актуальною схемою Assistant. Для server URL використовуйте Custom Credential з {{VAPI_SECRET}}; заголовок залежить від типу credential.",
+  "_comment": "Шаблон для ручного перенесення в Dashboard, не готовий payload для API. TODO(verify-vapi): перевірити підтримку української обраними моделлю, голосом і транскрайбером. Bearer Token Custom Credential має використовувати окремий {{VAPI_SECRET}}, не Private API key.",
   "firstMessage": "Вітаю, це Клініка флебології. Розмова записується. Мене звати Олена, я віртуальний асистент. Чим можу допомогти?",
   "model": {
     "provider": "{{MODEL_PROVIDER}}",

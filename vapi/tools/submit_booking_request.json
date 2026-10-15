@@ -55,5 +55,5 @@
     "url": "{{SERVER_URL}}/vapi/webhook",
     "credentialId": "{{VAPI_CREDENTIAL_ID}}"
   },
-  "_comment": "TODO(verify-vapi): створіть Custom Credential зі значенням {{VAPI_SECRET}} і звірте назву заголовка для обраного credential. Документація Vapi описує X-Vapi-Secret для звичайного token credential."
+  "_comment": "Створіть окремий Bearer Token Custom Credential зі значенням {{VAPI_SECRET}}. Backend приймає Authorization: Bearer або X-Vapi-Secret. Це не Private API key Vapi."
 }
