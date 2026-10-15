@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager, suppress
 from fastapi import FastAPI, Header, HTTPException, Request
 from pydantic import ValidationError
 
-from . import db, notifier, telegram, urgency
+from app import db, notifier, telegram, urgency
 from .config import settings
 from .schemas import BookingRequest
 
