@@ -39,12 +39,14 @@ class BookingRequest(BaseModel):
             if not info.data.get('is_urgent', False) and info.data.get('service_or_specialty') != 'Передзвін':
                 raise ValueError('patient_phone is required')
             return ''
+        if not re.fullmatch(r'\+?[\d\s().-]+', value) or (value.count('+') and not value.startswith('+')):
+            raise ValueError('invalid Ukrainian phone number')
         digits = re.sub(r'\D', '', value)
         if digits.startswith('380') and len(digits)==12:
             pass
         elif digits.startswith('0') and len(digits)==10:
             digits='38'+digits
-        elif len(digits)==9 and digits[0] in '345679':
+        elif len(digits)==9 and digits[0] in '3456789':
             digits='380'+digits
         else:
             raise ValueError('invalid Ukrainian phone number')

@@ -83,7 +83,7 @@ def format_call(r) -> str:
     if snippet:
         lines.append(f"💬 Пацієнт казав: {_e(snippet)}")
     lines.append(f"\n<i>Дзвінок: {_when(r)}</i>")
-    return "\n".join(lines)
+    return _truncate_message("\n".join(lines), 4096)
 
 
 def recording_caption(r) -> str:
