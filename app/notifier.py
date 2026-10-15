@@ -1,18 +1,17 @@
-"""Сповіщення адмінам: миттєво після збереження + фоновий retry.
+"""Telegram-сповіщення з повторними спробами та короткими DB claim leases."""
 
-Гарантія "щонайменше раз": рядок блокується (FOR UPDATE SKIP LOCKED), відправляється в Telegram,
-і тільки тоді ставиться admin_notified_at. Якщо Telegram не відповів - лишається NULL,
-і наступний тік циклу спробує знову. Дубль можливий лише якщо процес впаде між відправкою і commit.
-"""
 import asyncio
 import logging
+from uuid import uuid4
 
 from . import messages, telegram
 
 log = logging.getLogger("notifier")
 POLL_SECONDS = 15
-MAX_RECORDING_ATTEMPTS = 8  # ~2 хвилини спроб; далі запис лишається в Vapi і в БД (recording_url)
-_tasks: set[asyncio.Task] = set()  # тримаємо посилання, щоб задачі не збирав GC
+MAX_RECORDING_ATTEMPTS = 8
+MESSAGE_LEASE_SECONDS = 300
+RECORDING_LEASE_SECONDS = 600
+_tasks: set[asyncio.Task] = set()
 
 
 def fire_and_forget(coro) -> None:
@@ -21,24 +20,56 @@ def fire_and_forget(coro) -> None:
     task.add_done_callback(_tasks.discard)
 
 
+async def _release_message_claim(pool, table: str, row_id: int, token: str) -> None:
+    await pool.execute(
+        f"UPDATE {table} SET notify_claim_token = NULL, notify_claimed_until = NULL "
+        "WHERE id = $1 AND notify_claim_token = $2",
+        row_id,
+        token,
+    )
+
+
 async def _notify(pool, table: str, row_id: int, fmt) -> bool | None:
-    """True - відправлено, False - помилка (буде retry), None - нічого робити (вже відправлено)."""
-    # table приходить лише з наших літералів нижче, не від користувача
+    """Claim row короткою транзакцією, Telegram HTTP виконується після її commit."""
+    token = uuid4().hex
     try:
         async with pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
-                f"SELECT * FROM {table} WHERE id = $1 AND admin_notified_at IS NULL "
-                "FOR UPDATE SKIP LOCKED",
+                f"""
+                UPDATE {table}
+                SET notify_claim_token = $2,
+                    notify_claimed_until = now() + ($3::double precision * interval '1 second')
+                WHERE id = $1 AND admin_notified_at IS NULL
+                  AND (notify_claim_token IS NULL OR notify_claimed_until < now())
+                RETURNING *
+                """,
                 row_id,
+                token,
+                float(MESSAGE_LEASE_SECONDS),
             )
-            if row is None:
-                return None
-            # Транзакція БД утримується під час HTTP-запиту до Telegram (до 15 с); для демо це прийнятно.
+        if row is None:
+            return None
+
+        # Мережа викликається після завершення транзакції: блокування рядка не тримається до 15 с.
+        try:
             await telegram.send_message(fmt(row))
-            await conn.execute(f"UPDATE {table} SET admin_notified_at = now() WHERE id = $1", row_id)
+        except Exception as exc:
+            try:
+                await _release_message_claim(pool, table, row_id, token)
+            except Exception as release_exc:
+                log.error("notify claim release failed for %s #%s (%s)", table, row_id, type(release_exc).__name__)
+            log.error("notify %s #%s failed (%s), will retry", table, row_id, type(exc).__name__)
+            return False
+
+        await pool.execute(
+            f"UPDATE {table} SET admin_notified_at = now(), notify_claim_token = NULL, "
+            "notify_claimed_until = NULL WHERE id = $1 AND notify_claim_token = $2",
+            row_id,
+            token,
+        )
         return True
-    except Exception:
-        log.exception("notify %s #%s failed, will retry", table, row_id)
+    except Exception as exc:
+        log.error("notify %s #%s failed (%s)", table, row_id, type(exc).__name__)
         return False
 
 
@@ -55,42 +86,59 @@ async def notify_call(pool, row_id: int):
 
 
 async def notify_recording(pool, row_id: int) -> bool | None:
-    """Надсилає запис розмови окремим повідомленням. Помилка запису не блокує текстові сповіщення."""
+    """Завантажує та надсилає запис після короткого claim-запиту до PostgreSQL."""
     if not telegram.configured():
         return None
+    token = uuid4().hex
     try:
         async with pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
-                """
-                SELECT cl.*,
-                       ARRAY(SELECT b.id FROM booking_requests b
-                             WHERE b.call_id = cl.call_id ORDER BY b.id) AS booking_ids,
-                       EXISTS(SELECT 1 FROM booking_requests b
-                              WHERE b.call_id = cl.call_id AND b.is_urgent) AS booking_urgent
-                FROM call_logs cl
+                f"""
+                UPDATE call_logs AS cl
+                SET recording_claim_token = $2,
+                    recording_claimed_until = now() + ($4::double precision * interval '1 second'),
+                    recording_attempts = recording_attempts + 1
                 WHERE cl.id = $1 AND cl.send_recording AND cl.recording_sent_at IS NULL
-                  AND cl.recording_url IS NOT NULL AND cl.recording_attempts < $2
-                FOR UPDATE OF cl SKIP LOCKED
+                  AND cl.recording_url IS NOT NULL AND cl.recording_attempts < $3
+                  AND (cl.recording_claim_token IS NULL OR cl.recording_claimed_until < now())
+                RETURNING cl.*,
+                    ARRAY(SELECT b.id FROM booking_requests b
+                          WHERE b.call_id = cl.call_id ORDER BY b.id) AS booking_ids,
+                    EXISTS(SELECT 1 FROM booking_requests b
+                           WHERE b.call_id = cl.call_id AND b.is_urgent) AS booking_urgent
                 """,
-                row_id, MAX_RECORDING_ATTEMPTS,
+                row_id,
+                token,
+                MAX_RECORDING_ATTEMPTS,
+                float(RECORDING_LEASE_SECONDS),
             )
-            if row is None:
-                return None
+        if row is None:
+            return None
+
+        try:
+            await telegram.send_recording(row["recording_url"], messages.recording_caption(row))
+        except Exception as exc:
             try:
-                # Тут транзакція тримається під час завантаження й відправлення файла (до 60 с кожен крок);
-                # це допустимо лише для демо-навантаження, для production треба винести I/O за межі транзакції.
-                await telegram.send_recording(row["recording_url"], messages.recording_caption(row))
-            except Exception as e:
-                await conn.execute(
-                    "UPDATE call_logs SET recording_attempts = recording_attempts + 1 WHERE id = $1",
+                await pool.execute(
+                    "UPDATE call_logs SET recording_claim_token = NULL, recording_claimed_until = NULL "
+                    "WHERE id = $1 AND recording_claim_token = $2",
                     row_id,
+                    token,
                 )
-                log.warning("recording for call_log #%s not delivered (%s)", row_id, type(e).__name__)
-                return False
-            await conn.execute("UPDATE call_logs SET recording_sent_at = now() WHERE id = $1", row_id)
+            except Exception as release_exc:
+                log.error("recording claim release failed for call_log #%s (%s)", row_id, type(release_exc).__name__)
+            log.warning("recording for call_log #%s not delivered (%s)", row_id, type(exc).__name__)
+            return False
+
+        await pool.execute(
+            "UPDATE call_logs SET recording_sent_at = now(), recording_claim_token = NULL, "
+            "recording_claimed_until = NULL WHERE id = $1 AND recording_claim_token = $2",
+            row_id,
+            token,
+        )
         return True
-    except Exception:
-        log.exception("notify_recording #%s failed", row_id)
+    except Exception as exc:
+        log.error("notify_recording #%s failed (%s)", row_id, type(exc).__name__)
         return False
 
 
@@ -109,25 +157,28 @@ async def retry_loop(pool) -> None:
         try:
             rows = await pool.fetch(
                 "SELECT id FROM booking_requests WHERE admin_notified_at IS NULL "
+                "AND (notify_claimed_until IS NULL OR notify_claimed_until < now()) "
                 "ORDER BY is_urgent DESC, created_at LIMIT 20"
             )
-            for r in rows:
-                if await notify_booking(pool, r["id"]) is False:
-                    break  # Telegram, імовірно, лежить - не штурмуємо, спробуємо наступного тіку
+            for row in rows:
+                if await notify_booking(pool, row["id"]) is False:
+                    break
             rows = await pool.fetch(
                 "SELECT id FROM call_logs WHERE needs_callback AND admin_notified_at IS NULL "
+                "AND (notify_claimed_until IS NULL OR notify_claimed_until < now()) "
                 "ORDER BY is_urgent DESC, created_at LIMIT 20"
             )
-            for r in rows:
-                if await notify_call(pool, r["id"]) is False:
+            for row in rows:
+                if await notify_call(pool, row["id"]) is False:
                     break
             rows = await pool.fetch(
                 "SELECT id FROM call_logs WHERE send_recording AND recording_sent_at IS NULL "
                 "AND recording_url IS NOT NULL AND recording_attempts < $1 "
+                "AND (recording_claimed_until IS NULL OR recording_claimed_until < now()) "
                 "ORDER BY created_at LIMIT 20",
                 MAX_RECORDING_ATTEMPTS,
             )
-            for r in rows:
-                await notify_recording(pool, r["id"])
-        except Exception:
-            log.exception("retry loop error")
+            for row in rows:
+                await notify_recording(pool, row["id"])
+        except Exception as exc:
+            log.error("retry loop failed (%s)", type(exc).__name__)

@@ -1,6 +1,7 @@
 """Надсилання повідомлень і записів до Telegram-чатів адміністраторів."""
 import logging
-from urllib.parse import urlparse
+import ipaddress
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -22,6 +23,31 @@ def get_chat_ids() -> list[str]:
 
 def configured() -> bool:
     return bool(settings.tg_bot_token and get_chat_ids())
+
+
+def recording_url_allowed(url: str) -> bool:
+    """Дозволяє лише HTTPS URL з точного списку хостів VAPI_RECORDING_HOSTS."""
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname
+        port = parsed.port
+        if (
+            parsed.scheme != "https"
+            or not host
+            or parsed.username is not None
+            or parsed.password is not None
+            or port not in (None, 443)
+        ):
+            return False
+        try:
+            ipaddress.ip_address(host)
+            return False
+        except ValueError:
+            pass
+        normalized_host = host.encode("idna").decode("ascii").lower()
+        return normalized_host in settings.allowed_recording_hosts
+    except (UnicodeError, ValueError):
+        return False
 
 
 def _is_api_success(response: httpx.Response) -> bool:
@@ -115,33 +141,49 @@ def _recording_filename(content_type: str, url_path: str) -> tuple[str, str]:
 
 async def send_recording(url: str, caption: str) -> None:
     """Завантажує обмежений за розміром аудіофайл і надсилає його адміністраторам."""
-    parsed = urlparse(url)
-    if parsed.scheme != "https" or not parsed.hostname:
-        raise TelegramDeliveryError("Recording URL must use HTTPS")
+    if not recording_url_allowed(url):
+        raise TelegramDeliveryError("Recording URL host is not allowlisted")
 
     content = bytearray()
     content_type = ""
+    final_path = ""
     try:
-        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
-            async with client.stream("GET", url) as response:
-                if not response.is_success:
-                    log.warning("Recording download failed (HTTP %s)", response.status_code)
-                    raise TelegramDeliveryError("Recording download failed")
-                content_type = response.headers.get("content-type", "")
-                content_length = response.headers.get("content-length")
-                if content_length and int(content_length) > MAX_RECORDING_BYTES:
-                    raise TelegramDeliveryError("Recording is larger than the configured upload limit")
-                async for chunk in response.aiter_bytes(CHUNK_SIZE):
-                    content.extend(chunk)
-                    if len(content) > MAX_RECORDING_BYTES:
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
+            current_url = url
+            for redirect_count in range(4):
+                async with client.stream("GET", current_url) as response:
+                    if response.status_code in {301, 302, 303, 307, 308}:
+                        location = response.headers.get("location")
+                        if redirect_count == 3 or not location:
+                            raise TelegramDeliveryError("Recording redirect limit exceeded")
+                        next_url = urljoin(current_url, location)
+                        if not recording_url_allowed(next_url):
+                            raise TelegramDeliveryError("Recording redirect host is not allowlisted")
+                        current_url = next_url
+                        continue
+
+                    if not response.is_success:
+                        log.warning("Recording download failed (HTTP %s)", response.status_code)
+                        raise TelegramDeliveryError("Recording download failed")
+                    content_type = response.headers.get("content-type", "")
+                    content_length = response.headers.get("content-length")
+                    if content_length and int(content_length) > MAX_RECORDING_BYTES:
                         raise TelegramDeliveryError("Recording is larger than the configured upload limit")
+                    async for chunk in response.aiter_bytes(CHUNK_SIZE):
+                        content.extend(chunk)
+                        if len(content) > MAX_RECORDING_BYTES:
+                            raise TelegramDeliveryError("Recording is larger than the configured upload limit")
+                    final_path = urlparse(current_url).path
+                    break
+            else:
+                raise TelegramDeliveryError("Recording redirect limit exceeded")
     except TelegramDeliveryError:
         raise
     except (httpx.HTTPError, ValueError) as exc:
         log.warning("Recording download failed (%s)", type(exc).__name__)
         raise TelegramDeliveryError("Recording download failed") from None
 
-    method, filename = _recording_filename(content_type, parsed.path)
+    method, filename = _recording_filename(content_type, final_path)
     await _send_to_chats(
         method,
         {"caption": caption, "parse_mode": "HTML"},

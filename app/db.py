@@ -73,7 +73,9 @@ async def escalate_booking(pool: asyncpg.Pool, call_id: str, reason: str) -> lis
         SET is_urgent = true,
             urgent_reason = CASE WHEN urgent_reason IS NULL THEN $2
                                  ELSE urgent_reason || '; ' || $2 END,
-            admin_notified_at = NULL
+            admin_notified_at = NULL,
+            notify_claim_token = NULL,
+            notify_claimed_until = NULL
         WHERE call_id = $1 AND NOT is_urgent
         RETURNING id
         """,
