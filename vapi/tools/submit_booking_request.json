@@ -20,7 +20,7 @@
         },
         "city_or_branch": {
           "type": "string",
-          "description": "Місто чи відділення."
+          "description": "Місто."
         },
         "preferred_date": {
           "type": "string",
