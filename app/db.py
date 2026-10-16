@@ -42,15 +42,13 @@ async def save_booking_request(
         """
         INSERT INTO booking_requests
             (idempotency_key, call_id, patient_name, patient_phone, service_or_specialty,
-             city_or_branch, preferred_date, preferred_time, symptoms_summary,
-             is_urgent, urgent_reason)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             city_or_branch, preferred_date, preferred_time, symptoms_summary)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         ON CONFLICT (idempotency_key) DO NOTHING
         RETURNING id
         """,
         key, call_id, d.patient_name, d.patient_phone, d.service_or_specialty,
         d.city_or_branch, d.preferred_date, d.preferred_time, d.symptoms_summary,
-        d.is_urgent, d.urgent_reason,
     )
     if row:
         return row["id"], True
@@ -64,46 +62,24 @@ async def booking_exists_for_call(pool: asyncpg.Pool, call_id: str) -> bool:
     )
 
 
-async def escalate_booking(pool: asyncpg.Pool, call_id: str, reason: str) -> list[int]:
-    """Заявку не позначено як термінову, а в розмові є гострі ознаки -> підвищуємо
-    і скидаємо admin_notified_at, щоб адмін отримав повідомлення вже з міткою ВАЖЛИВЕ."""
-    rows = await pool.fetch(
-        """
-        UPDATE booking_requests
-        SET is_urgent = true,
-            urgent_reason = CASE WHEN urgent_reason IS NULL THEN $2
-                                 ELSE urgent_reason || '; ' || $2 END,
-            admin_notified_at = NULL,
-            notify_claim_token = NULL,
-            notify_claimed_until = NULL
-        WHERE call_id = $1 AND NOT is_urgent
-        RETURNING id
-        """,
-        call_id, reason,
-    )
-    return [r["id"] for r in rows]
-
-
 async def save_call_log(
     pool: asyncpg.Pool, call_id: str, caller_phone: str | None, ended_reason: str | None,
     transcript: str | None, recording_url: str | None,
-    needs_callback: bool, is_urgent: bool, urgent_reason: str | None, send_recording: bool,
+    needs_callback: bool, send_recording: bool,
 ) -> int:
     return await pool.fetchval(
         """
         INSERT INTO call_logs (call_id, caller_phone, ended_reason, transcript, recording_url,
-                               needs_callback, is_urgent, urgent_reason, send_recording)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                               needs_callback, send_recording)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (call_id) DO UPDATE SET
             ended_reason = EXCLUDED.ended_reason,
             transcript = EXCLUDED.transcript,
             recording_url = EXCLUDED.recording_url,
             needs_callback = EXCLUDED.needs_callback,
-            is_urgent = EXCLUDED.is_urgent,
-            urgent_reason = EXCLUDED.urgent_reason,
             send_recording = EXCLUDED.send_recording
         RETURNING id
         """,
         call_id, caller_phone, ended_reason, transcript, recording_url,
-        needs_callback, is_urgent, urgent_reason, send_recording,
+        needs_callback, send_recording,
     )

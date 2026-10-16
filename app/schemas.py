@@ -1,19 +1,34 @@
 from __future__ import annotations
+
 import re
 import unicodedata
+
 from pydantic import BaseModel, ConfigDict, field_validator
+
+
+ALLOWED_SERVICES = (
+    "Консультація флеболога",
+    "Консультація проктолога",
+    "УЗД судин",
+    "УЗД серця",
+    "Лазерне лікування вен",
+    "Склеротерапія",
+    "Біоклей",
+    "Підбір трикотажу",
+    "Передзвін",
+)
+_SERVICES_BY_CASEFOLD = {service.casefold(): service for service in ALLOWED_SERVICES}
+
 
 class BookingRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra='ignore', validate_default=True)
     patient_name: str
     service_or_specialty: str
     city_or_branch: str
-    is_urgent: bool = False
     patient_phone: str = ''
-    preferred_date: str = ''
-    preferred_time: str = ''
-    symptoms_summary: str = ''
-    urgent_reason: str = ''
+    preferred_date: str
+    preferred_time: str
+    symptoms_summary: str
 
     @field_validator('patient_name')
     @classmethod
@@ -23,9 +38,20 @@ class BookingRequest(BaseModel):
             raise ValueError('must not be empty')
         return value
 
-    @field_validator('service_or_specialty','city_or_branch')
+    @field_validator('service_or_specialty')
     @classmethod
-    def required_text(cls, value):
+    def validate_service(cls, value):
+        value = _clean(value, 200)
+        if not value:
+            raise ValueError('must not be empty')
+        service = _SERVICES_BY_CASEFOLD.get(value.casefold())
+        if service is None:
+            raise ValueError('choose an available clinic service or Передзвін')
+        return service
+
+    @field_validator('city_or_branch')
+    @classmethod
+    def validate_city_or_branch(cls, value):
         value = _clean(value, 200)
         if not value:
             raise ValueError('must not be empty')
@@ -36,7 +62,7 @@ class BookingRequest(BaseModel):
     def normalize_phone(cls, value, info):
         value = _clean(value, 40)
         if not value:
-            if not info.data.get('is_urgent', False) and info.data.get('service_or_specialty') != 'Передзвін':
+            if info.data.get('service_or_specialty') != 'Передзвін':
                 raise ValueError('patient_phone is required')
             return ''
         if not re.fullmatch(r'\+?[\d\s().-]+', value) or (value.count('+') and not value.startswith('+')):
@@ -54,11 +80,28 @@ class BookingRequest(BaseModel):
             raise ValueError('invalid Ukrainian phone number')
         return '+'+digits
 
-    @field_validator('preferred_date','preferred_time','symptoms_summary','urgent_reason')
+    @field_validator('preferred_date', 'preferred_time', 'symptoms_summary')
     @classmethod
-    def optional_text(cls, value, info):
-        limits={'preferred_date':120,'preferred_time':120,'symptoms_summary':1000,'urgent_reason':500}
-        return _clean(value,limits[info.field_name])
+    def validate_confirmed_fields(cls, value, info):
+        limits = {'preferred_date': 120, 'preferred_time': 120, 'symptoms_summary': 1000}
+        value = _clean(value, limits[info.field_name])
+        if not value:
+            raise ValueError('must not be empty; use Не вказано when unavailable')
+        if info.field_name == 'preferred_date' and value.casefold() != 'не вказано':
+            raise ValueError('preferred_date must be Не вказано')
+        if info.field_name == 'preferred_time':
+            allowed = {'перша половина дня', 'друга половина дня', 'не вказано'}
+            if value.casefold() not in allowed:
+                raise ValueError('choose a supported time preference or Не вказано')
+            normalized_times = {
+                'перша половина дня': 'перша половина дня',
+                'друга половина дня': 'друга половина дня',
+                'не вказано': 'Не вказано',
+            }
+            return normalized_times[value.casefold()]
+        if info.field_name == 'preferred_date':
+            return 'Не вказано'
+        return value
 
 def _clean(value: str, limit: int) -> str:
     value=''.join(ch for ch in value if unicodedata.category(ch) not in {'Cc','Cf'})

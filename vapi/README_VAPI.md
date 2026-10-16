@@ -21,7 +21,7 @@
 ## 3. Створіть Function tool
 
 1. У Vapi Dashboard створіть Assistant та окремий Function tool.
-2. Назва функції — `submit_booking_request`. Параметри перенесіть з [`tools/submit_booking_request.json`](tools/submit_booking_request.json).
+2. Назва функції — `submit_booking_request`. Параметри перенесіть з [`tools/submit_booking_request.json`](tools/submit_booking_request.json); вони мають збігатися з усіма полями, які Олена перевіряє з людиною перед збереженням. Якщо людина не знає послугу, промт дозволяє лише обмежену рекомендацію консультації або передзвін.
 3. У Server Settings інструмента задайте `https://<ваш-public-host>/vapi/webhook` і створений Bearer Token Credential.
 4. У Messages → Request Failed задайте саме цю фразу: «Вибачте, сталася технічна помилка. Будь ласка, зателефонуйте нам зранку.» Backend повертає поле `error` при збої; Vapi за наявності `error` запускає налаштоване повідомлення Request Failed. [Формат Function tool і помилок](https://docs.vapi.ai/tools/custom-tools).
 5. Переконайтеся, що успішний виклик інструмента повертає `results` з відповідним `toolCallId` і рядком `result`. Backend це формує автоматично.

@@ -103,9 +103,7 @@ async def notify_recording(pool, row_id: int) -> bool | None:
                   AND (cl.recording_claim_token IS NULL OR cl.recording_claimed_until < now())
                 RETURNING cl.*,
                     ARRAY(SELECT b.id FROM booking_requests b
-                          WHERE b.call_id = cl.call_id ORDER BY b.id) AS booking_ids,
-                    EXISTS(SELECT 1 FROM booking_requests b
-                           WHERE b.call_id = cl.call_id AND b.is_urgent) AS booking_urgent
+                          WHERE b.call_id = cl.call_id ORDER BY b.id) AS booking_ids
                 """,
                 row_id,
                 token,
@@ -142,10 +140,8 @@ async def notify_recording(pool, row_id: int) -> bool | None:
         return False
 
 
-async def notify_after_call(pool, call_log_id: int, escalated_booking_ids: list[int], needs_callback: bool):
-    """Порядок важливий: спершу текст (найважливіше), потім запис розмови."""
-    for rid in escalated_booking_ids:
-        await notify_booking(pool, rid)
+async def notify_after_call(pool, call_log_id: int, needs_callback: bool):
+    """Спершу надсилає текст передзвону, потім дозволений запис розмови."""
     if needs_callback:
         await notify_call(pool, call_log_id)
     await notify_recording(pool, call_log_id)
@@ -158,7 +154,7 @@ async def retry_loop(pool) -> None:
             rows = await pool.fetch(
                 "SELECT id FROM booking_requests WHERE admin_notified_at IS NULL "
                 "AND (notify_claimed_until IS NULL OR notify_claimed_until < now()) "
-                "ORDER BY is_urgent DESC, created_at LIMIT 20"
+                "ORDER BY created_at LIMIT 20"
             )
             for row in rows:
                 if await notify_booking(pool, row["id"]) is False:
@@ -166,7 +162,7 @@ async def retry_loop(pool) -> None:
             rows = await pool.fetch(
                 "SELECT id FROM call_logs WHERE needs_callback AND admin_notified_at IS NULL "
                 "AND (notify_claimed_until IS NULL OR notify_claimed_until < now()) "
-                "ORDER BY is_urgent DESC, created_at LIMIT 20"
+                "ORDER BY created_at LIMIT 20"
             )
             for row in rows:
                 if await notify_call(pool, row["id"]) is False:

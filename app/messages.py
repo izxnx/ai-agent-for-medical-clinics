@@ -3,7 +3,7 @@ from html import escape
 import re
 from zoneinfo import ZoneInfo
 
-from . import urgency
+from . import transcripts
 
 KYIV = ZoneInfo("Europe/Kyiv")
 
@@ -48,10 +48,7 @@ def _when(r) -> str:
 
 def format_booking(r) -> str:
     when = " ".join(x for x in (r["preferred_date"], r["preferred_time"]) if x)
-    if r["is_urgent"]:
-        head = f"🚨 <b>ВАЖЛИВЕ</b> - заявка #{r['id']}\nПередзвонити першими!"
-    else:
-        head = f"🆕 <b>Нова заявка #{r['id']}</b>"
+    head = f"🆕 <b>Нова заявка #{r['id']}</b>"
     lines = [
         head,
         "",
@@ -63,8 +60,6 @@ def format_booking(r) -> str:
     ]
     if r["symptoms_summary"]:
         lines.append(f"📝 Скарги: {_e(r['symptoms_summary'])}")
-    if r["is_urgent"]:
-        lines.append(f"⚠️ Причина: {_e(r['urgent_reason'])}")
     lines.append(f"\n<i>Дзвінок: {_when(r)}</i>")
     text = "\n".join(lines)
     return _truncate_message(text, 4096)
@@ -72,14 +67,9 @@ def format_booking(r) -> str:
 
 def format_call(r) -> str:
     """Дзвінок, після якого немає заявки (пацієнт кинув слухавку, збій tool тощо)."""
-    if r["is_urgent"]:
-        head = "🚨 <b>ВАЖЛИВЕ</b> - дзвінок БЕЗ заявки\nПередзвонити першими!"
-    else:
-        head = "📞 <b>Дзвінок без заявки</b>"
-    snippet = urgency.user_part(r["transcript"])[:300]
+    head = "📞 <b>Дзвінок без заявки</b>"
+    snippet = transcripts.user_part(r["transcript"])[:300]
     lines = [head, "", f"📞 Номер: {_e(r['caller_phone'])}"]
-    if r["is_urgent"]:
-        lines.append(f"⚠️ Причина: {_e(r['urgent_reason'])}")
     if snippet:
         lines.append(f"💬 Пацієнт казав: {_e(snippet)}")
     lines.append(f"\n<i>Дзвінок: {_when(r)}</i>")
@@ -88,9 +78,8 @@ def format_call(r) -> str:
 
 def recording_caption(r) -> str:
     """Підпис до запису розмови (ліміт Telegram - 1024 символи)."""
-    urgent = r["is_urgent"] or r["booking_urgent"]
     ids = r["booking_ids"]
     what = "Заявка " + ", ".join(f"#{i}" for i in ids) if ids else "Дзвінок без заявки"
-    head = "🚨 <b>ВАЖЛИВЕ</b> · 🎙 Запис розмови" if urgent else "🎙 <b>Запис розмови</b>"
+    head = "🎙 <b>Запис розмови</b>"
     text = f"{head}\n{what}\n📞 {_e(r['caller_phone'])}\n<i>Дзвінок: {_when(r)}</i>"
     return _truncate_message(text, 1024)
