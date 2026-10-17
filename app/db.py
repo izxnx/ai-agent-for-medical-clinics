@@ -56,9 +56,22 @@ async def save_booking_request(
     return existing, False
 
 
-async def booking_exists_for_call(pool: asyncpg.Pool, call_id: str) -> bool:
-    return await pool.fetchval(
-        "SELECT EXISTS (SELECT 1 FROM booking_requests WHERE call_id = $1)", call_id
+async def booking_contact_for_call(pool: asyncpg.Pool, call_id: str) -> asyncpg.Record:
+    """Повертає наявність заявки й лише явно переданий у ній контактний номер."""
+    return await pool.fetchrow(
+        """
+        SELECT EXISTS (
+                   SELECT 1 FROM booking_requests WHERE call_id = $1
+               ) AS has_booking,
+               (
+                   SELECT NULLIF(patient_phone, '')
+                   FROM booking_requests
+                   WHERE call_id = $1 AND patient_phone <> ''
+                   ORDER BY id DESC
+                   LIMIT 1
+               ) AS patient_phone
+        """,
+        call_id,
     )
 
 
@@ -73,6 +86,7 @@ async def save_call_log(
                                needs_callback, send_recording)
         VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (call_id) DO UPDATE SET
+            caller_phone = EXCLUDED.caller_phone,
             ended_reason = EXCLUDED.ended_reason,
             transcript = EXCLUDED.transcript,
             recording_url = EXCLUDED.recording_url,

@@ -18,8 +18,11 @@ services:
       APP_ENV: ${APP_ENV:-development}
       DATABASE_URL: postgresql://booking:${POSTGRES_PASSWORD}@db:5432/booking
       VAPI_SECRET: ${VAPI_SECRET:?Set VAPI_SECRET in .env}
+      VAPI_PRIVATE_API_KEY: ${VAPI_PRIVATE_API_KEY:-}
       TG_BOT_TOKEN: ${TG_BOT_TOKEN:-}
       TG_ADMIN_IDS: ${TG_ADMIN_IDS:-}
+      FORWARD_RECORDINGS_TO_TELEGRAM: ${FORWARD_RECORDINGS_TO_TELEGRAM:-false}
+      VAPI_RECORDING_HOSTS: ${VAPI_RECORDING_HOSTS:-}
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:

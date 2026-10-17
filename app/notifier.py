@@ -5,6 +5,7 @@ import logging
 from uuid import uuid4
 
 from . import messages, telegram
+from .config import settings
 
 log = logging.getLogger("notifier")
 POLL_SECONDS = 15
@@ -86,8 +87,8 @@ async def notify_call(pool, row_id: int):
 
 
 async def notify_recording(pool, row_id: int) -> bool | None:
-    """Завантажує та надсилає запис після короткого claim-запиту до PostgreSQL."""
-    if not telegram.configured():
+    """Завантажує запис через приватний Vapi API після короткого DB claim."""
+    if not telegram.configured() or not settings.recording_forwarding_enabled:
         return None
     token = uuid4().hex
     try:
@@ -99,7 +100,7 @@ async def notify_recording(pool, row_id: int) -> bool | None:
                     recording_claimed_until = now() + ($4::double precision * interval '1 second'),
                     recording_attempts = recording_attempts + 1
                 WHERE cl.id = $1 AND cl.send_recording AND cl.recording_sent_at IS NULL
-                  AND cl.recording_url IS NOT NULL AND cl.recording_attempts < $3
+                  AND cl.recording_attempts < $3
                   AND (cl.recording_claim_token IS NULL OR cl.recording_claimed_until < now())
                 RETURNING cl.*,
                     ARRAY(SELECT b.id FROM booking_requests b
@@ -114,7 +115,9 @@ async def notify_recording(pool, row_id: int) -> bool | None:
             return None
 
         try:
-            await telegram.send_recording(row["recording_url"], messages.recording_caption(row))
+            await telegram.send_recording(
+                row["call_id"], settings.vapi_private_api_key, messages.recording_caption(row)
+            )
         except Exception as exc:
             try:
                 await pool.execute(
@@ -167,14 +170,15 @@ async def retry_loop(pool) -> None:
             for row in rows:
                 if await notify_call(pool, row["id"]) is False:
                     break
-            rows = await pool.fetch(
-                "SELECT id FROM call_logs WHERE send_recording AND recording_sent_at IS NULL "
-                "AND recording_url IS NOT NULL AND recording_attempts < $1 "
-                "AND (recording_claimed_until IS NULL OR recording_claimed_until < now()) "
-                "ORDER BY created_at LIMIT 20",
-                MAX_RECORDING_ATTEMPTS,
-            )
-            for row in rows:
-                await notify_recording(pool, row["id"])
+            if settings.recording_forwarding_enabled:
+                rows = await pool.fetch(
+                    "SELECT id FROM call_logs WHERE send_recording AND recording_sent_at IS NULL "
+                    "AND recording_attempts < $1 "
+                    "AND (recording_claimed_until IS NULL OR recording_claimed_until < now()) "
+                    "ORDER BY created_at LIMIT 20",
+                    MAX_RECORDING_ATTEMPTS,
+                )
+                for row in rows:
+                    await notify_recording(pool, row["id"])
         except Exception as exc:
             log.error("retry loop failed (%s)", type(exc).__name__)

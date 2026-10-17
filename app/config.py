@@ -8,8 +8,10 @@ class Settings(BaseSettings):
     database_url: str = ""
     app_env: str = "development"
     vapi_secret: str = ""
+    vapi_private_api_key: str = ""
     tg_bot_token: str = ""
     tg_admin_ids: str = ""  # "111,222" - особисті чати адмінів або id групи
+    forward_recordings_to_telegram: bool = False
     vapi_recording_hosts: str = ""
 
     @field_validator("vapi_secret")
@@ -42,6 +44,22 @@ class Settings(BaseSettings):
             raise ValueError("DATABASE_URL must be set before startup")
         if self.app_env.lower() != "test" and (not self.vapi_secret.strip() or self.vapi_secret.lower().startswith("change-me")):
             raise ValueError("VAPI_SECRET must be set to a non-placeholder secret")
+        if self.forward_recordings_to_telegram and not self.vapi_private_api_key.strip():
+            raise ValueError(
+                "VAPI_PRIVATE_API_KEY is required when FORWARD_RECORDINGS_TO_TELEGRAM=true"
+            )
+        if self.forward_recordings_to_telegram and not self.allowed_recording_hosts:
+            raise ValueError(
+                "VAPI_RECORDING_HOSTS must contain the HTTPS redirect hostname when recording forwarding is enabled"
+            )
+
+    @property
+    def recording_forwarding_enabled(self) -> bool:
+        return (
+            self.forward_recordings_to_telegram
+            and bool(self.vapi_private_api_key.strip())
+            and bool(self.allowed_recording_hosts)
+        )
 
     @property
     def allowed_recording_hosts(self) -> set[str]:

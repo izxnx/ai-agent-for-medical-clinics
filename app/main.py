@@ -37,30 +37,6 @@ def _transcript_text(value) -> str:
     return ""
 
 
-def _recording_url(value) -> str | None:
-    """Дістає URL із recording; точну форму URL-об'єкта звірити на першому Vapi дзвінку."""
-    # TODO(verify-vapi): зіставити ключі об'єкта recording і redirect hosts з першим синтетичним звітом.
-    if isinstance(value, str):
-        return value
-    if not isinstance(value, dict):
-        return None
-    preferred_keys = (
-        "url", "recordingUrl", "presignedUrl", "presignedMonoUrl", "monoUrl",
-        "stereoUrl", "presignedStereoUrl",
-    )
-    for key in preferred_keys:
-        candidate = value.get(key)
-        if isinstance(candidate, str):
-            return candidate
-    for key, candidate in value.items():
-        lowered = str(key).lower()
-        if any(part in lowered for part in ("recording", "mono", "stereo")):
-            nested = _recording_url(candidate)
-            if nested:
-                return nested
-    return None
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings.validate_for_startup()
@@ -87,12 +63,6 @@ async def submit_booking_request(pool, args: dict, call: dict, tool_call_id: str
     """Повертає агенту інструкцію про завершення після збереження заявки."""
     call_id = call.get("id", "") if isinstance(call, dict) else ""
     args = dict(args) if isinstance(args, dict) else {}
-    # Vapi Call Object документує customer.number; якщо воно відсутнє, номер збирає асистент.
-    # Якщо пацієнт підтвердив "номер, з якого дзвонить", модель може лишити поле порожнім
-    if not args.get("patient_phone"):
-        customer = call.get("customer") if isinstance(call, dict) else None
-        customer = customer if isinstance(customer, dict) else {}
-        args["patient_phone"] = customer.get("number") or ""
 
     if not call_id:
         raise ValueError("missing call id")
@@ -126,29 +96,25 @@ async def handle_end_of_call(pool, msg: dict) -> None:
     artifact = msg.get("artifact")
     artifact = artifact if isinstance(artifact, dict) else {}
     transcript = _transcript_text(artifact.get("transcript") or msg.get("transcript"))
-    recording_url = (
-        _recording_url(artifact.get("recording"))
-        or artifact.get("recordingUrl")
-        or msg.get("recordingUrl")
-    )
-    if not isinstance(recording_url, str) or not telegram.recording_url_allowed(recording_url):
-        recording_url = None
-        log.info("recording omitted because its host is not allowlisted for call %s", call_id)
     user_text = transcripts.user_part(transcript)
-    has_booking = await db.booking_exists_for_call(pool, call_id)
+    booking = await db.booking_contact_for_call(pool, call_id)
+    has_booking = booking["has_booking"]
 
     # Дзвінок без заявки, але пацієнт щось казав -> адміну на передзвін
     needs_callback = (not has_booking) and bool(user_text.strip())
 
+    # Caller ID не є підтвердженим контактом. Для журналу беремо лише номер,
+    # який пацієнт підтвердив у заявці; сирий artifact/call payload ігноруємо.
     log_id = await db.save_call_log(
         pool,
         call_id=call_id,
-        caller_phone=(call.get("customer") or {}).get("number") if isinstance(call.get("customer"), dict) else None,
+        caller_phone=booking["patient_phone"],
         ended_reason=msg.get("endedReason"),
         transcript=transcript or None,
-        recording_url=recording_url,
+        # Vapi recording URLs є приватними/короткоживучими; їх отримує notifier за call_id.
+        recording_url=None,
         needs_callback=needs_callback,
-        send_recording=bool(recording_url) and (has_booking or needs_callback),  # порожні дзвінки адмінам не шлемо
+        send_recording=settings.recording_forwarding_enabled and (has_booking or needs_callback),
     )
 
     if needs_callback:

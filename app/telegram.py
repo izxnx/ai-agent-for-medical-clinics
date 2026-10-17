@@ -1,7 +1,7 @@
 """Надсилання повідомлень і записів до Telegram-чатів адміністраторів."""
 import logging
 import ipaddress
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 import httpx
 
@@ -38,6 +38,8 @@ def recording_url_allowed(url: str) -> bool:
             or parsed.password is not None
             or port not in (None, 443)
         ):
+            return False
+        if host.lower() == "localhost" or host.lower().endswith((".localhost", ".local", ".internal")):
             return False
         try:
             ipaddress.ip_address(host)
@@ -139,19 +141,22 @@ def _recording_filename(content_type: str, url_path: str) -> tuple[str, str]:
     raise TelegramDeliveryError("Recording endpoint returned a non-audio content type")
 
 
-async def send_recording(url: str, caption: str) -> None:
-    """Завантажує обмежений за розміром аудіофайл і надсилає його адміністраторам."""
-    if not recording_url_allowed(url):
-        raise TelegramDeliveryError("Recording URL host is not allowlisted")
+async def send_recording(call_id: str, private_api_key: str, caption: str) -> None:
+    """Отримує запис через приватний API Vapi й надсилає його без збереження signed URL."""
+    if not call_id.strip() or not private_api_key.strip():
+        raise TelegramDeliveryError("Vapi call ID and private API key are required")
 
+    api_url = f"https://api.vapi.ai/call/{quote(call_id, safe='')}/mono-recording"
     content = bytearray()
     content_type = ""
     final_path = ""
     try:
         async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
-            current_url = url
+            current_url = api_url
             for redirect_count in range(4):
-                async with client.stream("GET", current_url) as response:
+                # Приватний ключ надсилається тільки до api.vapi.ai, ніколи на signed URL.
+                headers = {"Authorization": f"Bearer {private_api_key}"} if current_url == api_url else {}
+                async with client.stream("GET", current_url, headers=headers) as response:
                     if response.status_code in {301, 302, 303, 307, 308}:
                         location = response.headers.get("location")
                         if redirect_count == 3 or not location:
