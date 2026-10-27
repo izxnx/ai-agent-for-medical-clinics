@@ -1,0 +1,87 @@
+{
+  "_comment": "Тіло для POST https://api.retellai.com/create-retell-llm (або ручне перенесення в Dashboard -> Agent -> LLM). general_prompt = повний текст prompts/olena_system_prompt.md. TODO(verify-retell): обрати модель і перевірити якість української.",
+  "model": "{{MODEL}}",
+  "start_speaker": "agent",
+  "begin_message": "Вітаю, це Клініка флебології. Розмова записується. Мене звати Олена, я віртуальний асистент. Чим можу допомогти?",
+  "general_prompt": "{{OLENA_SYSTEM_PROMPT_FROM_prompts/olena_system_prompt.md}}",
+  "general_tools": [
+    {
+      "type": "custom",
+      "name": "submit_booking_request",
+      "description": "Створи заявку після збору й усного підтвердження всіх полів. Якщо пацієнт не може обрати послугу з переліку, створи заявку на Передзвін.",
+      "url": "{{SERVER_URL}}/retell/function",
+      "method": "POST",
+      "args_at_root": false,
+      "speak_during_execution": false,
+      "speak_after_execution": true,
+      "timeout_ms": 10000,
+      "max_retry": 1,
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "patient_name": {
+            "type": "string",
+            "description": "Ім'я або «Не вказано»/«Не назвався»."
+          },
+          "patient_phone": {
+            "type": "string",
+            "description": "Підтверджений номер для зв'язку. Порожнім залишай лише якщо послуга — Передзвін і номера немає."
+          },
+          "service_or_specialty": {
+            "type": "string",
+            "description": "Одна послуга з переліку або Передзвін, якщо вибір потребує адміністратора.",
+            "enum": [
+              "Консультація флеболога",
+              "Консультація проктолога",
+              "УЗД судин",
+              "УЗД серця",
+              "Лазерне лікування вен",
+              "Склеротерапія",
+              "Біоклей",
+              "Підбір трикотажу",
+              "Передзвін"
+            ]
+          },
+          "city_or_branch": {
+            "type": "string",
+            "description": "Місто або «Не вказано», якщо пацієнт не відповів."
+          },
+          "preferred_date": {
+            "type": "string",
+            "description": "Не збирай дату голосом; передай «Не вказано».",
+            "enum": [
+              "Не вказано"
+            ]
+          },
+          "preferred_time": {
+            "type": "string",
+            "description": "Точно одне значення: «перша половина дня», «друга половина дня» або «Не вказано».",
+            "enum": [
+              "перша половина дня",
+              "друга половина дня",
+              "Не вказано"
+            ]
+          },
+          "symptoms_summary": {
+            "type": "string",
+            "description": "Короткий нейтральний виклад слів пацієнта; якщо нічого не описав, передай «Не вказано»."
+          }
+        },
+        "required": [
+          "patient_name",
+          "patient_phone",
+          "service_or_specialty",
+          "city_or_branch",
+          "preferred_date",
+          "preferred_time",
+          "symptoms_summary"
+        ]
+      }
+    },
+    {
+      "type": "end_call",
+      "name": "endCall",
+      "description": "Заверши дзвінок після прощання з пацієнтом."
+    }
+  ]
+}

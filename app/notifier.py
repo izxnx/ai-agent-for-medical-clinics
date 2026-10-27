@@ -87,7 +87,7 @@ async def notify_call(pool, row_id: int):
 
 
 async def notify_recording(pool, row_id: int) -> bool | None:
-    """Завантажує запис через приватний Vapi API після короткого DB claim."""
+    """Завантажує запис через Retell API після короткого DB claim."""
     if not telegram.configured() or not settings.recording_forwarding_enabled:
         return None
     token = uuid4().hex
@@ -116,7 +116,7 @@ async def notify_recording(pool, row_id: int) -> bool | None:
 
         try:
             await telegram.send_recording(
-                row["call_id"], settings.vapi_private_api_key, messages.recording_caption(row)
+                row["call_id"], settings.retell_api_key, messages.recording_caption(row)
             )
         except Exception as exc:
             try:

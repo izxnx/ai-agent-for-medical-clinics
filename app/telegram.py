@@ -26,7 +26,7 @@ def configured() -> bool:
 
 
 def recording_url_allowed(url: str) -> bool:
-    """Дозволяє лише HTTPS URL з точного списку хостів VAPI_RECORDING_HOSTS."""
+    """Дозволяє лише HTTPS URL з точного списку хостів RETELL_RECORDING_HOSTS."""
     try:
         parsed = urlparse(url)
         host = parsed.hostname
@@ -141,22 +141,39 @@ def _recording_filename(content_type: str, url_path: str) -> tuple[str, str]:
     raise TelegramDeliveryError("Recording endpoint returned a non-audio content type")
 
 
-async def send_recording(call_id: str, private_api_key: str, caption: str) -> None:
-    """Отримує запис через приватний API Vapi й надсилає його без збереження signed URL."""
-    if not call_id.strip() or not private_api_key.strip():
-        raise TelegramDeliveryError("Vapi call ID and private API key are required")
+async def _fetch_recording_url(client: httpx.AsyncClient, call_id: str, api_key: str) -> str:
+    """Бере свіжий recording_url з Retell API. Ключ надсилається лише на api.retellai.com."""
+    api_url = f"https://api.retellai.com/v2/get-call/{quote(call_id, safe='')}"
+    response = await client.get(api_url, headers={"Authorization": f"Bearer {api_key}"})
+    if not response.is_success:
+        log.warning("Retell get-call failed (HTTP %s)", response.status_code)
+        raise TelegramDeliveryError("Retell get-call failed")
+    try:
+        body = response.json()
+    except ValueError:
+        raise TelegramDeliveryError("Retell get-call returned invalid JSON") from None
+    url = body.get("recording_url") if isinstance(body, dict) else None
+    if not isinstance(url, str) or not url:
+        raise TelegramDeliveryError("Recording is not available yet")
+    return url
 
-    api_url = f"https://api.vapi.ai/call/{quote(call_id, safe='')}/mono-recording"
+
+async def send_recording(call_id: str, api_key: str, caption: str) -> None:
+    """Отримує запис дзвінка Retell і надсилає його без збереження URL у БД чи логах."""
+    if not call_id.strip() or not api_key.strip():
+        raise TelegramDeliveryError("Retell call ID and API key are required")
+
     content = bytearray()
     content_type = ""
     final_path = ""
     try:
         async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
-            current_url = api_url
+            current_url = await _fetch_recording_url(client, call_id, api_key)
+            if not recording_url_allowed(current_url):
+                raise TelegramDeliveryError("Recording host is not allowlisted")
             for redirect_count in range(4):
-                # Приватний ключ надсилається тільки до api.vapi.ai, ніколи на signed URL.
-                headers = {"Authorization": f"Bearer {private_api_key}"} if current_url == api_url else {}
-                async with client.stream("GET", current_url, headers=headers) as response:
+                # На хост запису ключ Retell не надсилається.
+                async with client.stream("GET", current_url) as response:
                     if response.status_code in {301, 302, 303, 307, 308}:
                         location = response.headers.get("location")
                         if redirect_count == 3 or not location:

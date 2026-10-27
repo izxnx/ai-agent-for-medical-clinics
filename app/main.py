@@ -1,14 +1,14 @@
 import asyncio
-import hmac
+import hashlib
 import json
 import logging
 from contextlib import asynccontextmanager, suppress
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 from pydantic import ValidationError
 
 from app import db, notifier, telegram
-from . import transcripts
+from . import retell_auth, transcripts
 from .config import settings
 from .schemas import BookingRequest
 
@@ -20,7 +20,7 @@ TOOL_FAILURE_MESSAGE = "Вибачте, сталася технічна поми
 
 
 def _transcript_text(value) -> str:
-    """Перетворює задокументовані Vapi рядок або список реплік у текст."""
+    """Перетворює транскрипт Retell (рядок або transcript_object[]) у текст User:/Assistant:."""
     if isinstance(value, str):
         return value
     if isinstance(value, list):
@@ -29,7 +29,7 @@ def _transcript_text(value) -> str:
             if not isinstance(item, dict):
                 continue
             role = item.get("role")
-            content = item.get("message") or item.get("content")
+            content = item.get("content") or item.get("message")
             if isinstance(role, str) and isinstance(content, str):
                 speaker = "User" if role.lower() in {"user", "customer"} else "Assistant"
                 lines.append(f"{speaker}: {content}")
@@ -59,9 +59,9 @@ app = FastAPI(lifespan=lifespan)
 
 
 # --- Tools -------------------------------------------------------------------
-async def submit_booking_request(pool, args: dict, call: dict, tool_call_id: str) -> str:
+async def submit_booking_request(pool, args: dict, call: dict) -> str:
     """Повертає агенту інструкцію про завершення після збереження заявки."""
-    call_id = call.get("id", "") if isinstance(call, dict) else ""
+    call_id = call.get("call_id", "") if isinstance(call, dict) else ""
     args = dict(args) if isinstance(args, dict) else {}
 
     if not call_id:
@@ -73,7 +73,12 @@ async def submit_booking_request(pool, args: dict, call: dict, tool_call_id: str
         bad = ", ".join(sorted({str(err["loc"][0]) for err in e.errors() if err["loc"]}))
         return f"Дані некоректні або відсутні: {bad}. Перепитай у пацієнта саме це."
 
-    rid, created = await db.save_booking_request(pool, f"{call_id}:{tool_call_id}", call_id, data)
+    # Retell не передає tool_call_id, тому ключ ідемпотентності = дзвінок + нормалізовані дані.
+    # Повтор того самого запиту (retry, подвійний виклик) не створить дубль заявки.
+    digest = hashlib.sha256(
+        json.dumps(data.model_dump(), sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()[:24]
+    rid, created = await db.save_booking_request(pool, f"{call_id}:{digest}", call_id, data)
     log.info("booking #%s %s", rid, "created" if created else "duplicate")
     if created:
         notifier.fire_and_forget(notifier.notify_booking(pool, rid))  # не затримуємо відповідь агенту
@@ -86,16 +91,13 @@ TOOLS = {"submit_booking_request": submit_booking_request}
 
 
 # --- Кінець дзвінка ------------------------------------------------------------
-async def handle_end_of_call(pool, msg: dict) -> None:
-    call = msg.get("call") or {}
-    call_id = call.get("id", "")
-    if not call_id:
-        log.warning("end-of-call-report without call id")
+async def handle_call_ended(pool, call: dict) -> None:
+    call_id = call.get("call_id", "")
+    if not isinstance(call_id, str) or not call_id:
+        log.warning("call_ended without call id")
         return
 
-    artifact = msg.get("artifact")
-    artifact = artifact if isinstance(artifact, dict) else {}
-    transcript = _transcript_text(artifact.get("transcript") or msg.get("transcript"))
+    transcript = _transcript_text(call.get("transcript_object")) or _transcript_text(call.get("transcript"))
     user_text = transcripts.user_part(transcript)
     booking = await db.booking_contact_for_call(pool, call_id)
     has_booking = booking["has_booking"]
@@ -104,14 +106,15 @@ async def handle_end_of_call(pool, msg: dict) -> None:
     needs_callback = (not has_booking) and bool(user_text.strip())
 
     # Caller ID не є підтвердженим контактом. Для журналу беремо лише номер,
-    # який пацієнт підтвердив у заявці; сирий artifact/call payload ігноруємо.
+    # який пацієнт підтвердив у заявці; from_number з payload ігноруємо.
+    reason = call.get("disconnection_reason")
     log_id = await db.save_call_log(
         pool,
         call_id=call_id,
         caller_phone=booking["patient_phone"],
-        ended_reason=msg.get("endedReason"),
+        ended_reason=reason if isinstance(reason, str) else None,
         transcript=transcript or None,
-        # Vapi recording URLs є приватними/короткоживучими; їх отримує notifier за call_id.
+        # recording_url не зберігаємо; notifier бере свіжий URL з Retell API за call_id.
         recording_url=None,
         needs_callback=needs_callback,
         send_recording=settings.recording_forwarding_enabled and (has_booking or needs_callback),
@@ -123,87 +126,70 @@ async def handle_end_of_call(pool, msg: dict) -> None:
     notifier.fire_and_forget(notifier.notify_after_call(pool, log_id, needs_callback))
 
 
-def _secret_matches(provided: str, expected: str) -> bool:
-    return bool(provided and expected) and hmac.compare_digest(
-        provided.encode("utf-8"), expected.encode("utf-8")
-    )
-
-
-# --- Webhook -----------------------------------------------------------------
-@app.post("/vapi/webhook")
-async def vapi_webhook(request: Request, x_vapi_secret: str = Header(default=""), authorization: str = Header(default="")):
-    # Custom Credential у Vapi налаштовується як Bearer або X-Vapi-Secret.
-    scheme, separator, credential = authorization.partition(" ")
-    bearer_secret = credential.strip() if separator and scheme.lower() == "bearer" else ""
-    if not (_secret_matches(x_vapi_secret, settings.vapi_secret)
-            or _secret_matches(bearer_secret, settings.vapi_secret)):
-        raise HTTPException(status_code=401, detail="unauthorized")
-
+async def _verified_json(request: Request, signature: str) -> dict:
+    raw = await request.body()
     try:
-        body = await request.json()
-    except (ValueError, UnicodeDecodeError):
+        raw_text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="invalid body")
+    if not retell_auth.verify(raw_text, settings.retell_api_key, signature):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    try:
+        body = json.loads(raw_text)
+    except ValueError:
         raise HTTPException(status_code=400, detail="invalid json")
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="invalid json")
-    msg = body.get("message", {})
-    if not isinstance(msg, dict):
-        msg = {}
+    return body
 
-    kind = msg.get("type")
-    if kind not in {"tool-calls", "end-of-call-report"}:
-        return {}
-    pool = request.app.state.pool
 
-    if kind == "tool-calls":
-        call = msg.get("call", {})
-        call = call if isinstance(call, dict) else {}
-        results = []
-        tool_calls = msg.get("toolCallList", [])
-        if not isinstance(tool_calls, list):
-            log.warning("toolCallList is not a list for call %s", call.get("id", "unknown"))
-            return {"results": results}
-        for tc in tool_calls:
-            if not isinstance(tc, dict) or not isinstance(tc.get("id"), str) or not tc["id"].strip():
-                log.warning("tool call without id skipped")
-                continue
-            function = tc.get("function")
-            function = function if isinstance(function, dict) else {}
-            # Актуальний payload: toolCallList[].function.{name,arguments}.
-            # Верхньорівневі поля залишено для сумісності зі старими інтеграціями.
-            raw_tool_name = function.get("name") or tc.get("name")
-            tool_name = raw_tool_name if isinstance(raw_tool_name, str) else "unknown"
-            tool = TOOLS.get(tool_name)
-            if tool is None:
-                response = {"toolCallId": tc["id"], "error": "Unknown tool"}
-            else:
-                try:
-                    args = function.get("arguments", tc.get("arguments", tc.get("parameters", {})))
-                    if isinstance(args, str):
-                        try:
-                            args = json.loads(args)
-                        except json.JSONDecodeError:
-                            args = None
-                    if not isinstance(args, dict):
-                        result = "Аргументи заявки некоректні. Збери дані ще раз і повтори виклик."
-                    else:
-                        result = await tool(pool, args, call, tc["id"])
-                    response = {"toolCallId": tc["id"], "result": " ".join(str(result).split())}
-                except Exception as exc:
-                    log.error("tool %s failed for call %s (%s)", tool_name, call.get("id", "unknown"), type(exc).__name__)
-                    response = {"toolCallId": tc["id"], "error": TOOL_FAILURE_MESSAGE}
-            results.append(response)
-        return {"results": results}
+# --- Custom function (Retell -> backend під час дзвінка) ----------------------
+@app.post("/retell/function")
+async def retell_function(request: Request, x_retell_signature: str = Header(default="")):
+    """Payload Retell: {"name": ..., "call": {...}, "args": {...}}. Відповідь іде в LLM агента."""
+    body = await _verified_json(request, x_retell_signature)
+    call = body.get("call")
+    call = call if isinstance(call, dict) else {}
+    call_id = call.get("call_id", "unknown")
+    tool_name = body.get("name") if isinstance(body.get("name"), str) else "unknown"
 
-    if kind == "end-of-call-report":
+    tool = TOOLS.get(tool_name)
+    if tool is None:
+        log.warning("unknown tool %s for call %s", tool_name, call_id)
+        return {"error": "Unknown tool"}
+
+    args = body.get("args")
+    if isinstance(args, str):
         try:
-            await handle_end_of_call(pool, msg)
-        except Exception as exc:
-            call = msg.get("call")
-            call_id = call.get("id", "unknown") if isinstance(call, dict) else "unknown"
-            log.error("end-of-call-report failed for call %s (%s)", call_id, type(exc).__name__)
-        return {}
+            args = json.loads(args)
+        except json.JSONDecodeError:
+            args = None
+    if not isinstance(args, dict):
+        return {"result": "Аргументи заявки некоректні. Збери дані ще раз і повтори виклик."}
 
-    return {}
+    try:
+        result = await tool(request.app.state.pool, args, call)
+    except Exception as exc:
+        log.error("tool %s failed for call %s (%s)", tool_name, call_id, type(exc).__name__)
+        return {"error": f"Технічна помилка. Скажи пацієнту: «{TOOL_FAILURE_MESSAGE}» і заверши дзвінок."}
+    return {"result": " ".join(str(result).split())}
+
+
+# --- Webhook подій дзвінка ---------------------------------------------------
+@app.post("/retell/webhook")
+async def retell_webhook(request: Request, x_retell_signature: str = Header(default="")):
+    """Retell чекає 2xx без тіла за 10 с, інакше повторює до 3 разів (обробка ідемпотентна)."""
+    body = await _verified_json(request, x_retell_signature)
+    if body.get("event") == "call_ended":
+        call = body.get("call")
+        call = call if isinstance(call, dict) else {}
+        try:
+            await handle_call_ended(request.app.state.pool, call)
+        except Exception as exc:
+            log.error("call_ended failed for call %s (%s)", call.get("call_id", "unknown"), type(exc).__name__)
+            # 5xx -> Retell повторить подію; save_call_log і сповіщення ідемпотентні.
+            raise HTTPException(status_code=500, detail="temporary failure")
+    return Response(status_code=204)
 
 
 @app.get("/health")
