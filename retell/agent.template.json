@@ -1,5 +1,5 @@
 {
-  "_comment": "Тіло для POST https://api.retellai.com/create-agent (або ручне налаштування Agent у Dashboard). llm_id береться з відповіді create-retell-llm.",
+  "_comment": "Тіло для POST https://api.retellai.com/create-agent (або ручне налаштування Agent у Dashboard). llm_id береться з відповіді create-retell-llm. TODO(verify-retell): звірити формат post_call_analysis_data з актуальним API; у Dashboard це Post call extraction -> Text.",
   "agent_name": "Олена — Клініка флебології",
   "response_engine": {
     "type": "retell-llm",
@@ -9,9 +9,47 @@
   "language": "uk-UA",
   "webhook_url": "{{SERVER_URL}}/retell/webhook",
   "webhook_events": [
-    "call_ended"
+    "call_ended",
+    "call_analyzed"
   ],
   "max_call_duration_ms": 900000,
   "end_call_after_silence_ms": 30000,
-  "data_storage_setting": "everything"
+  "data_storage_setting": "everything",
+  "post_call_analysis_data": [
+    {
+      "type": "string",
+      "name": "summary_uk",
+      "description": "Підсумок розмови українською, 1-2 речення: що хотів пацієнт і чим закінчилась розмова."
+    },
+    {
+      "type": "string",
+      "name": "patient_name",
+      "description": "Ім'я пацієнта, якщо він його назвав. Інакше порожньо."
+    },
+    {
+      "type": "string",
+      "name": "patient_phone",
+      "description": "Номер телефону, який пацієнт продиктував. Інакше порожньо."
+    },
+    {
+      "type": "string",
+      "name": "service",
+      "description": "Послуга, про яку йшлося (наприклад «УЗД судин»)."
+    },
+    {
+      "type": "string",
+      "name": "city",
+      "description": "Місто або філія, яку обрав пацієнт."
+    },
+    {
+      "type": "string",
+      "name": "preferred_time",
+      "description": "Бажаний час: «перша половина дня» або «друга половина дня», інакше порожньо."
+    },
+    {
+      "type": "string",
+      "name": "complaint",
+      "description": "Скарга пацієнта коротко, українською."
+    }
+  ]
 }

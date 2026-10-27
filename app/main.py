@@ -80,8 +80,8 @@ async def submit_booking_request(pool, args: dict, call: dict) -> str:
     ).hexdigest()[:24]
     rid, created = await db.save_booking_request(pool, f"{call_id}:{digest}", call_id, data)
     log.info("booking #%s %s", rid, "created" if created else "duplicate")
-    if created:
-        notifier.fire_and_forget(notifier.notify_booking(pool, rid))  # не затримуємо відповідь агенту
+    # Адміну заявка приходить одним звітом після дзвінка (підсумок + діалог + запис),
+    # а не окремим повідомленням посеред розмови. Якщо звіт не прийде, retry_loop надішле картку.
 
     return "Заявку збережено. Подякуй пацієнту, повідом, що адміністратор зв'яжеться зранку, і заверши дзвінок."
 
@@ -91,11 +91,11 @@ TOOLS = {"submit_booking_request": submit_booking_request}
 
 
 # --- Кінець дзвінка ------------------------------------------------------------
-async def handle_call_ended(pool, call: dict) -> None:
+async def handle_call_ended(pool, call: dict) -> int | None:
     call_id = call.get("call_id", "")
     if not isinstance(call_id, str) or not call_id:
         log.warning("call_ended without call id")
-        return
+        return None
 
     transcript = _transcript_text(call.get("transcript_object")) or _transcript_text(call.get("transcript"))
     user_text = transcripts.user_part(transcript)
@@ -122,8 +122,35 @@ async def handle_call_ended(pool, call: dict) -> None:
 
     if needs_callback:
         log.info("call %s ended without booking, callback requested", log_id)
+    # Звіт адміну надсилається після події call_analyzed (там підсумок і поля від Retell).
+    # Якщо аналіз не прийде, retry_loop надішле звіт без підсумку через REPORT_WAIT_SECONDS.
+    return log_id
 
-    notifier.fire_and_forget(notifier.notify_after_call(pool, log_id, needs_callback))
+
+def _clean_text(value, limit: int = 300) -> str | None:
+    if not isinstance(value, (str, int, float)) or isinstance(value, bool):
+        return None
+    text = " ".join(str(value).split())[:limit]
+    return text or None
+
+
+async def handle_call_analyzed(pool, call: dict) -> None:
+    """call_analyzed містить повні дані дзвінка + call_analysis. Зберігаємо й надсилаємо звіт."""
+    call_id = call.get("call_id", "")
+    if not isinstance(call_id, str) or not call_id:
+        log.warning("call_analyzed without call id")
+        return
+    log_id = await handle_call_ended(pool, call)  # upsert: подія call_ended могла загубитися
+    if log_id is None:
+        return
+
+    analysis = call.get("call_analysis")
+    analysis = analysis if isinstance(analysis, dict) else {}
+    custom = analysis.get("custom_analysis_data")
+    custom = custom if isinstance(custom, dict) else {}
+    fields = {k: v for k in db.ANALYSIS_FIELDS if (v := _clean_text(custom.get(k), 600 if k == "summary_uk" else 300))}
+    await db.save_call_analysis(pool, call_id, _clean_text(analysis.get("call_summary"), 1000), fields)
+    notifier.fire_and_forget(notifier.notify_after_call(pool, log_id))
 
 
 async def _verified_json(request: Request, signature: str) -> dict:
@@ -180,13 +207,15 @@ async def retell_function(request: Request, x_retell_signature: str = Header(def
 async def retell_webhook(request: Request, x_retell_signature: str = Header(default="")):
     """Retell чекає 2xx без тіла за 10 с, інакше повторює до 3 разів (обробка ідемпотентна)."""
     body = await _verified_json(request, x_retell_signature)
-    if body.get("event") == "call_ended":
+    event = body.get("event")
+    handlers = {"call_ended": handle_call_ended, "call_analyzed": handle_call_analyzed}
+    if event in handlers:
         call = body.get("call")
         call = call if isinstance(call, dict) else {}
         try:
-            await handle_call_ended(request.app.state.pool, call)
+            await handlers[event](request.app.state.pool, call)
         except Exception as exc:
-            log.error("call_ended failed for call %s (%s)", call.get("call_id", "unknown"), type(exc).__name__)
+            log.error("%s failed for call %s (%s)", event, call.get("call_id", "unknown"), type(exc).__name__)
             # 5xx -> Retell повторить подію; save_call_log і сповіщення ідемпотентні.
             raise HTTPException(status_code=500, detail="temporary failure")
     return Response(status_code=204)

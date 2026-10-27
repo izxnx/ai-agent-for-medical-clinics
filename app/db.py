@@ -1,3 +1,4 @@
+import json
 import logging
 from pathlib import Path
 
@@ -96,4 +97,23 @@ async def save_call_log(
         """,
         call_id, caller_phone, ended_reason, transcript, recording_url,
         needs_callback, send_recording,
+    )
+
+
+ANALYSIS_FIELDS = (
+    "summary_uk", "patient_name", "patient_phone", "service", "city", "preferred_time", "complaint",
+)
+
+
+async def save_call_analysis(
+    pool: asyncpg.Pool, call_id: str, call_summary: str | None, analysis: dict
+) -> int | None:
+    """Зберігає результат Post-Call Analysis. Повертає id журналу дзвінка або None."""
+    return await pool.fetchval(
+        """
+        UPDATE call_logs SET call_summary = $2, analysis = $3::jsonb, analyzed_at = now()
+        WHERE call_id = $1
+        RETURNING id
+        """,
+        call_id, call_summary, json.dumps(analysis, ensure_ascii=False),
     )
