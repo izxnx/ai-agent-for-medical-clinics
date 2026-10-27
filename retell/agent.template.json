@@ -1,0 +1,17 @@
+{
+  "_comment": "Тіло для POST https://api.retellai.com/create-agent (або ручне налаштування Agent у Dashboard). llm_id береться з відповіді create-retell-llm.",
+  "agent_name": "Олена — Клініка флебології",
+  "response_engine": {
+    "type": "retell-llm",
+    "llm_id": "{{LLM_ID}}"
+  },
+  "voice_id": "{{VOICE_ID}}",
+  "language": "uk-UA",
+  "webhook_url": "{{SERVER_URL}}/retell/webhook",
+  "webhook_events": [
+    "call_ended"
+  ],
+  "max_call_duration_ms": 900000,
+  "end_call_after_silence_ms": 30000,
+  "data_storage_setting": "everything"
+}

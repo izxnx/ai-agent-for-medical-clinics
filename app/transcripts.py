@@ -1,4 +1,4 @@
-"""Utilities for extracting caller turns from Vapi transcripts."""
+"""Utilities for extracting caller turns from Retell transcripts."""
 
 import re
 
@@ -6,7 +6,7 @@ import re
 def user_part(transcript: str | None) -> str:
     if not transcript:
         return ""
-    speaker_pattern = re.compile(r"(?im)(?<!\S)(User|Customer|Assistant|AI)\s*:\s*")
+    speaker_pattern = re.compile(r"(?im)(?<!\S)(User|Customer|Assistant|Agent|AI)\s*:\s*")
     speakers = list(speaker_pattern.finditer(transcript))
     if not speakers:
         return transcript.strip()
