@@ -78,12 +78,19 @@ async def submit_booking_request(pool, args: dict, call: dict) -> str:
     digest = hashlib.sha256(
         json.dumps(data.model_dump(), sort_keys=True, ensure_ascii=False).encode("utf-8")
     ).hexdigest()[:24]
-    rid, created = await db.save_booking_request(pool, f"{call_id}:{digest}", call_id, data)
+    rid, created = await db.save_booking_request_with_retry(pool, f"{call_id}:{digest}", call_id, data)
     log.info("booking #%s %s", rid, "created" if created else "duplicate")
     # Адміну заявка приходить одним звітом після дзвінка (підсумок + діалог + запис),
     # а не окремим повідомленням посеред розмови. Якщо звіт не прийде, retry_loop надішле картку.
 
-    return "Заявку збережено. Подякуй пацієнту, повідом, що адміністратор зв'яжеться зранку, і заверши дзвінок."
+    if data.patient_phone:
+        return "Заявку збережено. Подякуй пацієнту, повідом, що адміністратор зв'яжеться зранку, і заверши дзвінок."
+    # Без номера передзвін неможливий: агент не має цього обіцяти.
+    return (
+        "Звернення збережено без номера телефону. Не обіцяй передзвін. Скажи, що без номера "
+        "адміністратор не зможе зателефонувати, і запропонуй зателефонувати в клініку в робочий час. "
+        "Подякуй і заверши дзвінок."
+    )
 
 
 TOOLS = {"submit_booking_request": submit_booking_request}
@@ -105,9 +112,12 @@ async def handle_call_ended(pool, call: dict) -> int | None:
     # Дзвінок без заявки, але пацієнт щось казав -> адміну на передзвін
     needs_callback = (not has_booking) and bool(user_text.strip())
 
-    # Caller ID не є підтвердженим контактом. Для журналу беремо лише номер,
-    # який пацієнт підтвердив у заявці; from_number з payload ігноруємо.
+    # Caller ID не є підтвердженим контактом: caller_phone = лише номер із заявки,
+    # а номер, з якого дзвонили (вхідний телефонний дзвінок), зберігаємо окремо в caller_id.
     reason = call.get("disconnection_reason")
+    caller_id = None
+    if call.get("direction") == "inbound":
+        caller_id = _clean_text(call.get("from_number"), 40)
     log_id = await db.save_call_log(
         pool,
         call_id=call_id,
@@ -118,6 +128,7 @@ async def handle_call_ended(pool, call: dict) -> int | None:
         recording_url=None,
         needs_callback=needs_callback,
         send_recording=settings.recording_forwarding_enabled and (has_booking or needs_callback),
+        caller_id=caller_id,
     )
 
     if needs_callback:

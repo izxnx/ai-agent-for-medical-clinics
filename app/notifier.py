@@ -9,7 +9,9 @@ from .config import settings
 
 log = logging.getLogger("notifier")
 POLL_SECONDS = 15
-MAX_RECORDING_ATTEMPTS = 8
+# Пауза після кожної невдалої спроби надіслати запис (разом ~4.5 год), далі остаточна невдача.
+RECORDING_RETRY_DELAYS = (30, 60, 120, 300, 600, 1200, 1800, 3600, 3600, 3600)
+MAX_RECORDING_ATTEMPTS = len(RECORDING_RETRY_DELAYS) + 1
 MESSAGE_LEASE_SECONDS = 300
 RECORDING_LEASE_SECONDS = 600
 REPORT_WAIT_SECONDS = 120        # скільки чекаємо call_analyzed, перш ніж слати звіт без підсумку
@@ -143,8 +145,20 @@ async def notify_report(pool, row_id: int) -> bool | None:
         return False
 
 
+def _safe_error(exc: Exception) -> str:
+    """Для БД: текст лише наших безпечних помилок, інакше тільки назва класу."""
+    if isinstance(exc, telegram.TelegramDeliveryError):
+        return str(exc)[:200]
+    return type(exc).__name__
+
+
 async def notify_recording(pool, row_id: int) -> bool | None:
-    """Завантажує запис через Retell API після короткого DB claim."""
+    """Завантажує запис через Retell API після короткого DB claim.
+
+    Невдача -> наступна спроба через RECORDING_RETRY_DELAYS (наростаючий інтервал).
+    Після останньої спроби або постійної помилки: recording_failed_at + попередження адмінам.
+    Повторно надіслати вручну: див. README, розділ «Запис не надіслано».
+    """
     if not telegram.configured() or not settings.recording_forwarding_enabled:
         return None
     token = uuid4().hex
@@ -157,8 +171,10 @@ async def notify_recording(pool, row_id: int) -> bool | None:
                     recording_claimed_until = now() + ($4::double precision * interval '1 second'),
                     recording_attempts = recording_attempts + 1
                 WHERE cl.id = $1 AND cl.send_recording AND cl.recording_sent_at IS NULL
+                  AND cl.recording_failed_at IS NULL
                   AND cl.admin_notified_at IS NOT NULL  -- спершу текстовий звіт, потім запис
                   AND cl.recording_attempts < $3
+                  AND (cl.recording_next_attempt_at IS NULL OR cl.recording_next_attempt_at <= now())
                   AND (cl.recording_claim_token IS NULL OR cl.recording_claimed_until < now())
                 RETURNING cl.*,
                     ARRAY(SELECT b.id FROM booking_requests b
@@ -177,21 +193,41 @@ async def notify_recording(pool, row_id: int) -> bool | None:
                 row["call_id"], settings.retell_api_key, messages.recording_caption(row)
             )
         except Exception as exc:
+            attempts = row["recording_attempts"]
+            final = isinstance(exc, telegram.PermanentDeliveryError) or attempts >= MAX_RECORDING_ATTEMPTS
+            delay = 0 if final else RECORDING_RETRY_DELAYS[min(attempts - 1, len(RECORDING_RETRY_DELAYS) - 1)]
             try:
                 await pool.execute(
-                    "UPDATE call_logs SET recording_claim_token = NULL, recording_claimed_until = NULL "
+                    "UPDATE call_logs SET recording_claim_token = NULL, recording_claimed_until = NULL, "
+                    "recording_last_error = $3, "
+                    "recording_next_attempt_at = now() + ($4::double precision * interval '1 second'), "
+                    "recording_failed_at = CASE WHEN $5 THEN now() ELSE NULL END "
                     "WHERE id = $1 AND recording_claim_token = $2",
                     row_id,
                     token,
+                    _safe_error(exc),
+                    float(delay),
+                    final,
                 )
             except Exception as release_exc:
                 log.error("recording claim release failed for call_log #%s (%s)", row_id, type(release_exc).__name__)
-            log.warning("recording for call_log #%s not delivered (%s)", row_id, type(exc).__name__)
+            if final:
+                log.error("recording for call_log #%s failed permanently (%s)", row_id, _safe_error(exc))
+                try:
+                    await telegram.send_message(messages.recording_failed(row, row["booking_ids"]))
+                except Exception as warn_exc:
+                    log.error("recording failure notice for call_log #%s not sent (%s)", row_id, type(warn_exc).__name__)
+            else:
+                log.warning(
+                    "recording for call_log #%s not delivered (%s), retry in %ss",
+                    row_id, _safe_error(exc), delay,
+                )
             return False
 
         await pool.execute(
             "UPDATE call_logs SET recording_sent_at = now(), recording_claim_token = NULL, "
-            "recording_claimed_until = NULL WHERE id = $1 AND recording_claim_token = $2",
+            "recording_claimed_until = NULL, recording_last_error = NULL "
+            "WHERE id = $1 AND recording_claim_token = $2",
             row_id,
             token,
         )
@@ -238,7 +274,8 @@ async def retry_loop(pool) -> None:
             if settings.recording_forwarding_enabled:
                 rows = await pool.fetch(
                     "SELECT id FROM call_logs WHERE send_recording AND recording_sent_at IS NULL "
-                    "AND admin_notified_at IS NOT NULL "
+                    "AND admin_notified_at IS NOT NULL AND recording_failed_at IS NULL "
+                    "AND (recording_next_attempt_at IS NULL OR recording_next_attempt_at <= now()) "
                     "AND recording_attempts < $1 "
                     "AND (recording_claimed_until IS NULL OR recording_claimed_until < now()) "
                     "ORDER BY created_at LIMIT 20",

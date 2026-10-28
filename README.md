@@ -34,6 +34,7 @@
 | `migrations/003_recordings.sql` | Стан доставки аудіозапису й лічильник повторів. |
 | `migrations/004_notification_leases.sql` | Тимчасові claim-поля, щоб паралельні задачі не відправляли одне сповіщення одночасно. |
 | `migrations/006_call_reports.sql` | Підсумок і поля Post-Call Analysis у `call_logs`; старі дзвінки позначає як уже надіслані. |
+| `migrations/007_reliability.sql` | Caller ID окремо від підтвердженого номера; стан повторів запису розмови (наступна спроба, остання помилка, остаточна невдача). |
 | `migrations/005_remove_legacy_flags.sql` | Видаляє старі поля `is_urgent` і `urgent_reason` та їхній індекс; рядки заявок, дзвінків, транскрипти й записи лишаються. Перед запуском зробіть резервну копію БД. |
 | `prompts/olena_system_prompt.md` | Системний промт Олени; його вміст потрібно вручну вставити в LLM агента Retell (Global Prompt). |
 | `retell/submit_booking_request.tool.json` | Шаблон custom function із параметрами заявки. |
@@ -119,6 +120,18 @@ Invoke-RestMethod http://localhost:8000/health
 Покрокова інструкція — у [`retell/README_RETELL.md`](retell/README_RETELL.md). Коротко: агент Retell (Single Prompt) з промтом Олени, custom function `submit_booking_request` → `https://<host>/retell/function`, end-call tool `endCall`, webhook агента → `https://<host>/retell/webhook` з подіями `call_ended` і `call_analyzed`, Post Call Extraction з полями для звіту, мова `uk-UA`.
 
 ### Пересилання записів
+
+### Запис не надіслано
+
+Якщо запис не вдалося надіслати (Retell ще не віддав файл, Telegram недоступний), бекенд повторює спроби з наростаючою паузою: 30 с, 1, 2, 5, 10, 20, 30 хв і далі щогодини, разом близько 4,5 год. Текстові звіти від цього не залежать. Після останньої невдалої спроби або помилки, яку повтор не виправить (файл завеликий, хост не дозволений), адміністратори отримують коротке попередження «Запис розмови не надіслано» з `call_id`. Причину видно в колонці `recording_last_error`.
+
+Щоб надіслати конкретний запис ще раз, коли причину усунено, підставте `call_id` з попередження:
+
+```bash
+docker compose exec db psql -U booking -d booking -c "UPDATE call_logs SET recording_attempts = 0, recording_failed_at = NULL, recording_next_attempt_at = NULL WHERE call_id = 'call_...'"
+```
+
+Протягом 15 с бекенд спробує знову.
 
 Запис не надсилається в Telegram, доки `FORWARD_RECORDINGS_TO_TELEGRAM=false`. Якщо для синтетичного демо аудіо справді потрібне, увімкніть `FORWARD_RECORDINGS_TO_TELEGRAM=true` і задайте `RETELL_RECORDING_HOSTS`.
 

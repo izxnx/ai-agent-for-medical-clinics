@@ -136,7 +136,14 @@ def format_report(r, bookings=()) -> str:
     if summary:
         lines += [f"📋 {escape(summary)}", ""]
     if bookings or a:
-        lines.append(f"👤 {_v(f['name'], _NOT_SAID)} · 📞 {_v(f['phone'], _NOT_SAID)}")
+        if f["phone"]:
+            phone = escape(f["phone"])
+        elif r["caller_id"]:
+            # Пацієнт номер не назвав, але це вхідний телефонний дзвінок: показуємо номер дзвінка.
+            phone = f"{escape(r['caller_id'])} (номер дзвінка)"
+        else:
+            phone = _NOT_SAID
+        lines.append(f"👤 {_v(f['name'], _NOT_SAID)} · 📞 {phone}")
         lines.append(f"🩺 {_v(f['service'])} · 📍 {_v(f['city'])} · 🕒 {_v(f['when'])}")
         if f["complaint"]:
             lines.append(f"📝 {escape(f['complaint'])}")
@@ -150,6 +157,18 @@ def format_report(r, bookings=()) -> str:
     if dialog:
         text += quote_open + dialog + quote_close
     return _truncate_message(text, REPORT_LIMIT)
+
+
+def recording_failed(r, bookings_ids) -> str:
+    """Окреме коротке попередження, коли запис так і не вдалося доставити."""
+    what = "заявки " + ", ".join(f"#{i}" for i in bookings_ids) if bookings_ids else "дзвінка без заявки"
+    text = (
+        f"⚠️ <b>Запис розмови не надіслано</b>\n"
+        f"Для {what} від {_when(r)} запис не вдалося доставити.\n"
+        f"Його можна прослухати в Retell Dashboard → History.\n"
+        f"<code>{escape(r['call_id'])}</code>"
+    )
+    return _truncate_message(text, 4096)
 
 
 def recording_caption(r) -> str:

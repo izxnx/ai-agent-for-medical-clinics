@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -33,6 +34,38 @@ async def run_migrations(pool: asyncpg.Pool) -> None:
                     await conn.execute("INSERT INTO schema_migrations(name) VALUES ($1)", f.name)
         finally:
             await conn.execute("SELECT pg_advisory_unlock(727001)")
+
+
+# Тимчасові збої БД: обрив з'єднання, перезапуск Postgres, вичерпаний пул, тайм-аут.
+TRANSIENT_DB_ERRORS = (
+    OSError,
+    asyncio.TimeoutError,
+    asyncpg.InterfaceError,
+    asyncpg.PostgresConnectionError,
+    asyncpg.TooManyConnectionsError,
+    asyncpg.CannotConnectNowError,
+)
+# Retell чекає відповідь custom function до 10 с: 3 спроби по 2.5 с + паузи вкладаються в цей ліміт.
+SAVE_ATTEMPT_TIMEOUT = 2.5
+SAVE_RETRY_DELAYS = (0.3, 0.7)
+
+
+async def save_booking_request_with_retry(
+    pool: asyncpg.Pool, key: str, call_id: str, d: BookingRequest
+) -> tuple[int, bool]:
+    """Кілька швидких спроб при тимчасовому збої БД. Дублів немає завдяки idempotency_key."""
+    for attempt in range(len(SAVE_RETRY_DELAYS) + 1):
+        try:
+            rid, created = await asyncio.wait_for(
+                save_booking_request(pool, key, call_id, d), SAVE_ATTEMPT_TIMEOUT
+            )
+            return rid, created
+        except TRANSIENT_DB_ERRORS as exc:
+            if attempt == len(SAVE_RETRY_DELAYS):
+                raise
+            log.warning("booking save attempt %s failed (%s), retrying", attempt + 1, type(exc).__name__)
+            await asyncio.sleep(SAVE_RETRY_DELAYS[attempt])
+    raise RuntimeError("unreachable")
 
 
 async def save_booking_request(
@@ -79,15 +112,16 @@ async def booking_contact_for_call(pool: asyncpg.Pool, call_id: str) -> asyncpg.
 async def save_call_log(
     pool: asyncpg.Pool, call_id: str, caller_phone: str | None, ended_reason: str | None,
     transcript: str | None, recording_url: str | None,
-    needs_callback: bool, send_recording: bool,
+    needs_callback: bool, send_recording: bool, caller_id: str | None = None,
 ) -> int:
     return await pool.fetchval(
         """
         INSERT INTO call_logs (call_id, caller_phone, ended_reason, transcript, recording_url,
-                               needs_callback, send_recording)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+                               needs_callback, send_recording, caller_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         ON CONFLICT (call_id) DO UPDATE SET
             caller_phone = EXCLUDED.caller_phone,
+            caller_id = COALESCE(EXCLUDED.caller_id, call_logs.caller_id),
             ended_reason = EXCLUDED.ended_reason,
             transcript = EXCLUDED.transcript,
             recording_url = EXCLUDED.recording_url,
@@ -96,7 +130,7 @@ async def save_call_log(
         RETURNING id
         """,
         call_id, caller_phone, ended_reason, transcript, recording_url,
-        needs_callback, send_recording,
+        needs_callback, send_recording, caller_id,
     )
 
 
