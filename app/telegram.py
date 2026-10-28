@@ -16,6 +16,10 @@ class TelegramDeliveryError(RuntimeError):
     """Безпечна для логів помилка доставки без URL, токенів або тексту відповіді API."""
 
 
+class PermanentDeliveryError(TelegramDeliveryError):
+    """Повтор не допоможе (файл завеликий, хост не дозволений): одразу остаточна невдача."""
+
+
 def get_chat_ids() -> list[str]:
     """Повертає ID адміністраторів або групи з TG_ADMIN_IDS."""
     return [value.strip() for value in settings.tg_admin_ids.split(",") if value.strip()]
@@ -170,7 +174,7 @@ async def send_recording(call_id: str, api_key: str, caption: str) -> None:
         async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
             current_url = await _fetch_recording_url(client, call_id, api_key)
             if not recording_url_allowed(current_url):
-                raise TelegramDeliveryError("Recording host is not allowlisted")
+                raise PermanentDeliveryError("Recording host is not allowlisted")
             for redirect_count in range(4):
                 # На хост запису ключ Retell не надсилається.
                 async with client.stream("GET", current_url) as response:
@@ -180,7 +184,7 @@ async def send_recording(call_id: str, api_key: str, caption: str) -> None:
                             raise TelegramDeliveryError("Recording redirect limit exceeded")
                         next_url = urljoin(current_url, location)
                         if not recording_url_allowed(next_url):
-                            raise TelegramDeliveryError("Recording redirect host is not allowlisted")
+                            raise PermanentDeliveryError("Recording redirect host is not allowlisted")
                         current_url = next_url
                         continue
 
@@ -190,11 +194,11 @@ async def send_recording(call_id: str, api_key: str, caption: str) -> None:
                     content_type = response.headers.get("content-type", "")
                     content_length = response.headers.get("content-length")
                     if content_length and int(content_length) > MAX_RECORDING_BYTES:
-                        raise TelegramDeliveryError("Recording is larger than the configured upload limit")
+                        raise PermanentDeliveryError("Recording is larger than the configured upload limit")
                     async for chunk in response.aiter_bytes(CHUNK_SIZE):
                         content.extend(chunk)
                         if len(content) > MAX_RECORDING_BYTES:
-                            raise TelegramDeliveryError("Recording is larger than the configured upload limit")
+                            raise PermanentDeliveryError("Recording is larger than the configured upload limit")
                     final_path = urlparse(current_url).path
                     break
             else:
