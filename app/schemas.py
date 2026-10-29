@@ -61,7 +61,11 @@ class BookingRequest(BaseModel):
     @classmethod
     def normalize_phone(cls, value, info):
         value = _clean(value, 40)
+        if '{' in value or '}' in value:
+            value = ''  # нерозкрита змінна промту ({{user_number}}) = номера немає
         if not value:
+            if (info.context or {}).get('allow_empty_phone'):
+                return ''  # тестовий дзвінок з браузера: номера дзвінка не існує
             if info.data.get('service_or_specialty') != 'Передзвін':
                 raise ValueError('patient_phone is required')
             return ''

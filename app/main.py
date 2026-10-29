@@ -67,8 +67,10 @@ async def submit_booking_request(pool, args: dict, call: dict) -> str:
     if not call_id:
         raise ValueError("missing call id")
 
+    is_test_call = call.get("call_type") == "web_call"
     try:
-        data = BookingRequest(**args)
+        # У тестовому дзвінку з браузера номера дзвінка немає: заявку приймаємо без телефону.
+        data = BookingRequest.model_validate(args, context={"allow_empty_phone": is_test_call})
     except ValidationError as e:
         bad = ", ".join(sorted({str(err["loc"][0]) for err in e.errors() if err["loc"]}))
         return f"Дані некоректні або відсутні: {bad}. Перепитай у пацієнта саме це."
@@ -83,7 +85,7 @@ async def submit_booking_request(pool, args: dict, call: dict) -> str:
     # Адміну заявка приходить одним звітом після дзвінка (підсумок + діалог + запис),
     # а не окремим повідомленням посеред розмови. Якщо звіт не прийде, retry_loop надішле картку.
 
-    if data.patient_phone:
+    if data.patient_phone or is_test_call:
         return "Заявку збережено. Подякуй пацієнту, повідом, що адміністратор зв'яжеться зранку, і заверши дзвінок."
     # Без номера передзвін неможливий: агент не має цього обіцяти.
     return (
@@ -129,6 +131,8 @@ async def handle_call_ended(pool, call: dict) -> int | None:
         needs_callback=needs_callback,
         send_recording=settings.recording_forwarding_enabled and (has_booking or needs_callback),
         caller_id=caller_id,
+        call_type=_clean_text(call.get("call_type"), 40),
+        collected=_collected_args(call),
     )
 
     if needs_callback:
@@ -136,6 +140,37 @@ async def handle_call_ended(pool, call: dict) -> int | None:
     # Звіт адміну надсилається після події call_analyzed (там підсумок і поля від Retell).
     # Якщо аналіз не прийде, retry_loop надішле звіт без підсумку через REPORT_WAIT_SECONDS.
     return log_id
+
+
+BOOKING_ARG_FIELDS = (
+    "patient_name", "patient_phone", "service_or_specialty", "city_or_branch",
+    "preferred_time", "symptoms_summary",
+)
+
+
+def _collected_args(call: dict) -> dict | None:
+    """Аргументи останнього виклику submit_booking_request з transcript_with_tool_calls.
+
+    Це дані, які агент зібрав і підтвердив з пацієнтом, навіть якщо заявка не збереглась.
+    """
+    items = call.get("transcript_with_tool_calls")
+    if not isinstance(items, list):
+        return None
+    for item in reversed(items):
+        if not isinstance(item, dict) or item.get("role") != "tool_call_invocation":
+            continue
+        if item.get("name") != "submit_booking_request":
+            continue
+        raw = item.get("arguments")
+        try:
+            args = json.loads(raw) if isinstance(raw, str) else raw
+        except ValueError:
+            continue
+        if not isinstance(args, dict):
+            continue
+        collected = {k: v for k in BOOKING_ARG_FIELDS if (v := _clean_text(args.get(k), 300))}
+        return collected or None
+    return None
 
 
 def _clean_text(value, limit: int = 300) -> str | None:

@@ -35,6 +35,7 @@
 | `migrations/004_notification_leases.sql` | Тимчасові claim-поля, щоб паралельні задачі не відправляли одне сповіщення одночасно. |
 | `migrations/006_call_reports.sql` | Підсумок і поля Post-Call Analysis у `call_logs`; старі дзвінки позначає як уже надіслані. |
 | `migrations/007_reliability.sql` | Caller ID окремо від підтвердженого номера; стан повторів запису розмови (наступна спроба, остання помилка, остаточна невдача). |
+| `migrations/008_test_calls.sql` | Тип дзвінка (тестовий з браузера чи телефонний) і дані, які Олена зібрала в `submit_booking_request`; з них звіт заповнюється навіть без Post-Call Analysis. |
 | `migrations/005_remove_legacy_flags.sql` | Видаляє старі поля `is_urgent` і `urgent_reason` та їхній індекс; рядки заявок, дзвінків, транскрипти й записи лишаються. Перед запуском зробіть резервну копію БД. |
 | `prompts/olena_system_prompt.md` | Системний промт Олени; його вміст потрібно вручну вставити в LLM агента Retell (Global Prompt). |
 | `retell/submit_booking_request.tool.json` | Шаблон custom function із параметрами заявки. |

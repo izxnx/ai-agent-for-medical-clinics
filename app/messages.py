@@ -84,24 +84,80 @@ def _v(value, missing: str = "не вказано") -> str:
     return escape(str(value)) if value else missing
 
 
+def _json(value) -> dict:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            value = None
+    return value if isinstance(value, dict) else {}
+
+
+def _given(value):
+    """Порожні значення й заглушки агента («Не вказано») вважаємо відсутніми."""
+    if not value or str(value).strip().casefold() in {"не вказано", "не назвався", "не назвалась"}:
+        return None
+    return str(value).strip()
+
+
+def _is_test_call(r) -> bool:
+    return r["call_type"] == "web_call"
+
+
 def _report_fields(r, bookings) -> dict:
-    """Дані для звіту: із заявки (підтверджені пацієнтом), інакше з аналізу Retell."""
+    """Дані для звіту. Пріоритет: збережена заявка -> аргументи, які агент зібрав
+    у submit_booking_request (навіть якщо заявка не збереглась) -> Post-Call Analysis."""
     a = _analysis(r)
     if bookings:
         b = bookings[-1]
-        when = " ".join(
-            x for x in (b["preferred_date"], b["preferred_time"]) if x and x.casefold() != "не вказано"
-        )
-        return {
+        src = {
             "name": b["patient_name"], "phone": b["patient_phone"] or r["caller_phone"],
             "service": b["service_or_specialty"], "city": b["city_or_branch"],
-            "when": when, "complaint": b["symptoms_summary"],
+            "when": b["preferred_time"], "complaint": b["symptoms_summary"],
         }
-    return {
-        "name": a.get("patient_name"), "phone": a.get("patient_phone") or r["caller_phone"],
-        "service": a.get("service"), "city": a.get("city"),
-        "when": a.get("preferred_time"), "complaint": a.get("complaint"),
+        return {k: _given(v) for k, v in src.items()}
+    c = _json(r["collected"])
+    pairs = {
+        "name": (c.get("patient_name"), a.get("patient_name")),
+        "phone": (c.get("patient_phone"), a.get("patient_phone")),
+        "service": (c.get("service_or_specialty"), a.get("service")),
+        "city": (c.get("city_or_branch"), a.get("city")),
+        "when": (c.get("preferred_time"), a.get("preferred_time")),
+        "complaint": (c.get("symptoms_summary"), a.get("complaint")),
     }
+    fields = {k: _given(x) or _given(y) for k, (x, y) in pairs.items()}
+    if fields["phone"] and ("{" in fields["phone"] or "}" in fields["phone"]):
+        fields["phone"] = None  # нерозкрита змінна промту
+    return fields
+
+
+def _is_ukrainian(text: str) -> bool:
+    """Українських літер більше, ніж латинських (англійський підсумок з «УЗД судин» не проходить)."""
+    cyr = len(re.findall(r"[а-щьюяєіїґА-ЩЬЮЯЄІЇҐ]", text))
+    lat = len(re.findall(r"[A-Za-z]", text))
+    return cyr > lat
+
+
+def _summary(r, f, booked: bool) -> str | None:
+    """Підсумок українською: поле summary_uk -> підсумок Retell, якщо він український ->
+    коротке речення з зібраних даних. Англійський підсумок Retell не показуємо."""
+    a = _analysis(r)
+    if a.get("summary_uk"):
+        return a["summary_uk"]
+    if r["call_summary"] and _is_ukrainian(r["call_summary"]):
+        return r["call_summary"]
+    who = f["name"] or "Пацієнт"
+    if f["service"] == "Передзвін":
+        text = f"{who} просить передзвонити"
+    elif f["service"]:
+        text = f"{who} хоче записатися на послугу «{f['service']}»"
+    else:
+        return None if booked else f"{who} звернувся до клініки, заявку не оформлено."
+    if f["city"]:
+        text += f" у місті {f['city']}"
+    if f["when"]:
+        text += f", {f['when']}"
+    return text + "." + ("" if booked else " Заявку не оформлено.")
 
 
 def _dialog(transcript: str | None, budget: int) -> str:
@@ -124,7 +180,6 @@ def _dialog(transcript: str | None, budget: int) -> str:
 
 def format_report(r, bookings=()) -> str:
     """Звіт після дзвінка: підсумок, ключові поля, згорнутий діалог (варіант D)."""
-    a = _analysis(r)
     f = _report_fields(r, bookings)
     if bookings:
         head = "🆕 <b>Заявка " + ", ".join(f"#{b['id']}" for b in bookings) + "</b>"
@@ -132,15 +187,17 @@ def format_report(r, bookings=()) -> str:
         head = "📞 <b>Дзвінок без заявки</b>"
 
     lines = [head, ""]
-    summary = a.get("summary_uk") or r["call_summary"]
+    summary = _summary(r, f, bool(bookings))
     if summary:
         lines += [f"📋 {escape(summary)}", ""]
-    if bookings or a:
+    if any(f.values()):
         if f["phone"]:
             phone = escape(f["phone"])
         elif r["caller_id"]:
             # Пацієнт номер не назвав, але це вхідний телефонний дзвінок: показуємо номер дзвінка.
             phone = f"{escape(r['caller_id'])} (номер дзвінка)"
+        elif _is_test_call(r):
+            phone = "тестовий дзвінок"
         else:
             phone = _NOT_SAID
         lines.append(f"👤 {_v(f['name'], _NOT_SAID)} · 📞 {phone}")
@@ -148,7 +205,7 @@ def format_report(r, bookings=()) -> str:
         if f["complaint"]:
             lines.append(f"📝 {escape(f['complaint'])}")
     else:
-        lines.append("<i>Аналіз розмови від Retell не надійшов, деталі в діалозі нижче.</i>")
+        lines.append("<i>Пацієнт не назвав даних для заявки, деталі в діалозі нижче.</i>")
     lines.append(f"\n<i>Дзвінок: {_when(r)}</i>")
     text = "\n".join(lines)
 
@@ -176,5 +233,13 @@ def recording_caption(r) -> str:
     ids = r["booking_ids"]
     what = "Заявка " + ", ".join(f"#{i}" for i in ids) if ids else "Дзвінок без заявки"
     head = "🎙 <b>Запис розмови</b>"
-    text = f"{head}\n{what}\n📞 {_e(r['caller_phone'])}\n<i>Дзвінок: {_when(r)}</i>"
+    if r["caller_phone"]:
+        phone = escape(r["caller_phone"])
+    elif r["caller_id"]:
+        phone = f"{escape(r['caller_id'])} (номер дзвінка)"
+    elif _is_test_call(r):
+        phone = "тестовий дзвінок"
+    else:
+        phone = "не вказано"
+    text = f"{head}\n{what}\n📞 {phone}\n<i>Дзвінок: {_when(r)}</i>"
     return _truncate_message(text, 1024)

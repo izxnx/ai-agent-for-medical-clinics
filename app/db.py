@@ -113,13 +113,16 @@ async def save_call_log(
     pool: asyncpg.Pool, call_id: str, caller_phone: str | None, ended_reason: str | None,
     transcript: str | None, recording_url: str | None,
     needs_callback: bool, send_recording: bool, caller_id: str | None = None,
+    call_type: str | None = None, collected: dict | None = None,
 ) -> int:
     return await pool.fetchval(
         """
         INSERT INTO call_logs (call_id, caller_phone, ended_reason, transcript, recording_url,
-                               needs_callback, send_recording, caller_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                               needs_callback, send_recording, caller_id, call_type, collected)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
         ON CONFLICT (call_id) DO UPDATE SET
+            call_type = COALESCE(EXCLUDED.call_type, call_logs.call_type),
+            collected = COALESCE(EXCLUDED.collected, call_logs.collected),
             caller_phone = EXCLUDED.caller_phone,
             caller_id = COALESCE(EXCLUDED.caller_id, call_logs.caller_id),
             ended_reason = EXCLUDED.ended_reason,
@@ -130,7 +133,8 @@ async def save_call_log(
         RETURNING id
         """,
         call_id, caller_phone, ended_reason, transcript, recording_url,
-        needs_callback, send_recording, caller_id,
+        needs_callback, send_recording, caller_id, call_type,
+        json.dumps(collected, ensure_ascii=False) if collected else None,
     )
 
 
